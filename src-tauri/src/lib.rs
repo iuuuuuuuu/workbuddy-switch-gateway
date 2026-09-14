@@ -150,6 +150,16 @@ pub fn run() {
             // README 截图模式只渲染前端虚构数据，禁止读取账号后执行签到、轮换或保活。
             if !is_screenshot_demo() {
                 spawn_background_loops();
+                // 网关「随 App 启动」：读 auto_start，为真则在此拉起网关子进程。
+                //
+                // 必须放在 setup 里（事件循环之前）：用户勾选后重启 App 就该看到网关跑起来，
+                // 而不是等前端页面加载完再补启动 —— 后者在「启动后直接进托盘、从不打开
+                // 主窗口」的场景下永远不会发生。
+                tauri::async_runtime::spawn(async move {
+                    if let Some(v) = modules::gateway::maybe_autostart().await {
+                        let _ = v;
+                    }
+                });
             }
             Ok(())
         })

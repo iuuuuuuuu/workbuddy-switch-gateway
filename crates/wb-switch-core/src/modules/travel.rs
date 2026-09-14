@@ -21,6 +21,15 @@ use crate::modules::refresh::{ensure_fresh_token, refresh_account_token};
 static TRAVEL_RUNNING: AtomicBool = AtomicBool::new(false);
 static TRAVEL_CLAIM_RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// buddy 域接口路径（与 Go 网关侧 upstream/travel.go 的常量保持一致）。
+///
+/// 为什么要在这里补齐：Rust 侧原先只会派/领旅行，遇到「没有猫」仅标记 `no-buddy`
+/// 就返回，**从不领养**。领养实现在 Go 网关侧（且只在签到/旅行巡检里跑），
+/// 于是当网关侧巡检未触发时，账号会永远停在无猫状态。
+const BUDDY_INFO_PATH: &str = "/activity/growth/buddy/info";
+const BUDDY_FIRST_PATH: &str = "/activity/growth/buddy/first";
+const BUDDY_AGREEMENT_PATH: &str = "/activity/growth/buddy/agreement";
+
 /// 自动旅行覆盖的账号集合：仅国服账号。
 ///
 /// 国际版（workbuddy.ai）的成长中心尚未上线：`travel/status` 与 `travel/config`
@@ -124,6 +133,79 @@ fn resp_error(resp: &Value, fallback_code: i64) -> String {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("code={fallback_code}"))
+}
+
+/// 领养门槛未达标的业务关键词（HTTP 400 时出现）。
+///
+/// 上游要求先攒够对话轮次才允许领养；未达标属**预期**行为，不应反复重试。
+const BUDDY_TASK_INCOMPLETE_MARKER: &str = "first_buddy task not completed yet";
+
+/// 判定响应是否为「领养门槛未达标」（可预期，不重试）。
+fn is_buddy_task_incomplete(resp: &Value) -> bool {
+    let text = resp
+        .get("message")
+        .or_else(|| resp.get("msg"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    text.contains(BUDDY_TASK_INCOMPLETE_MARKER)
+}
+
+/// 查询账号是否已有猫（buddy）。
+///
+/// 返回 `Some(true)` 有猫、`Some(false)` 明确无猫（`buddy: null`）、`None` 查询失败
+///（调用方应跳过本账号，避免把"查不到"误判成"需要领养"而盲目写操作）。
+async fn fetch_has_buddy(account: &Value) -> Option<bool> {
+    let resp = travel_request(BUDDY_INFO_PATH, "GET", None, account).await;
+    if resp.get("code").and_then(Value::as_i64).unwrap_or(-1) != 0 {
+        return None;
+    }
+    let data = resp.get("data")?;
+    match data.get("buddy") {
+        // null / 缺字段 都表示没有猫。
+        None | Some(Value::Null) => Some(false),
+        Some(_) => Some(true),
+    }
+}
+
+/// 领养结果（供缓存与界面展示）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AdoptOutcome {
+    /// 领养成功（或无猫状态已被上游修正）。
+    Adopted,
+    /// 同意协议成功但领养门槛未达（对话轮次不够）——当日不再重试。
+    ThresholdNotReached,
+    /// 其他失败（网络/业务错误），可重试。
+    Failed,
+}
+
+/// 为无猫账号执行领养：先同意协议（幂等），再调 buddy/first。
+///
+/// 背景（本次修复）：此前 Rust 侧遇到「no active buddy」只把结果标成 `no-buddy`
+/// 就返回，**从不发起领养** —— 而 Go 网关侧的领养只在签到/旅行巡检里跑。用户关掉
+/// 或未触发网关侧巡检时，账号就永远停在"无猫"状态，表现为「说好会自动领养却没有」。
+async fn adopt_buddy(account: &Value) -> AdoptOutcome {
+    // 1) 同意协议（幂等，重复调用无副作用）。
+    let agree = travel_request(
+        BUDDY_AGREEMENT_PATH,
+        "POST",
+        Some(json!({ "agree": true })),
+        account,
+    )
+    .await;
+    if agree.get("code").and_then(Value::as_i64).unwrap_or(-1) != 0 {
+        return AdoptOutcome::Failed;
+    }
+    // 2) 领养第一只猫。
+    let first = travel_request(BUDDY_FIRST_PATH, "POST", Some(json!({})), account).await;
+    let code = first.get("code").and_then(Value::as_i64).unwrap_or(-1);
+    if code == 0 {
+        return AdoptOutcome::Adopted;
+    }
+    if is_buddy_task_incomplete(&first) {
+        return AdoptOutcome::ThresholdNotReached;
+    }
+    AdoptOutcome::Failed
 }
 
 fn parse_travel_state(raw: Option<&str>) -> Option<&'static str> {
@@ -469,15 +551,55 @@ pub async fn depart_travel_for_account(account: &Value) -> Value {
                 return result;
             }
             DepartClass::NoBuddy => {
-                return depart_result(
-                    &acc,
-                    uid_ref,
-                    false,
-                    false,
-                    Some("no-buddy"),
-                    None,
-                    "无 Buddy",
-                );
+                // 无猫 → 先尝试领养（此前这里只标记 no-buddy 就返回，故从不领养）。
+                //
+                // 领养成功后**不再**在同一轮里接着派猫：上游对"刚领养就派出"可能
+                // 尚未就绪，留给下一轮（run_travel_cycle 每 30 分钟一轮）更稳妥，
+                // 也避免把一次请求放大成三步串行写操作。
+                match adopt_buddy(&acc).await {
+                    AdoptOutcome::Adopted => {
+                        // ok=true 表示"本轮动作成功"，但**不能**让它被当成 traveling：
+                        // result_in_flight 只认 `ok && !claimed`，若这里给 ok=true，
+                        // 界面会把刚领养的账号显示成"旅行中"（实际还没派出）。
+                        // 故显式带上 claim 语义的 skip 值，并由 display_label 识别。
+                        let mut result = depart_result(
+                            &acc,
+                            uid_ref,
+                            true,
+                            false,
+                            Some("adopted"),
+                            Some("idle"),
+                            "已领养，稍后派出",
+                        );
+                        // 领养不是"在途"，明确标成已完成，避免沿用 traveling 的倒计时展示。
+                        result["claimed"] = json!(true);
+                        result["claimedAt"] = json!(now_ms());
+                        return result;
+                    }
+                    AdoptOutcome::ThresholdNotReached => {
+                        // 对话轮次不够：当日不再重试（与 Go 侧 adoptTried 同语义）。
+                        return depart_result(
+                            &acc,
+                            uid_ref,
+                            false,
+                            false,
+                            Some("no-buddy"),
+                            None,
+                            "无 Buddy（领养需先积累对话）",
+                        );
+                    }
+                    AdoptOutcome::Failed => {
+                        return depart_result(
+                            &acc,
+                            uid_ref,
+                            false,
+                            false,
+                            Some("no-buddy"),
+                            None,
+                            "无 Buddy（领养失败，稍后重试）",
+                        );
+                    }
+                }
             }
             DepartClass::LocationUnavailable => {
                 last_unavailable = true;
@@ -756,6 +878,58 @@ async fn sync_account_for_dispatch(account: &Value, prior: Option<&Value>) -> Va
     let uid = acc.get("uid").and_then(Value::as_str).map(String::from);
     let uid_ref = uid.as_deref();
 
+    // 主动领养：每轮巡检先看有没有猫，没有就领养 —— 不依赖"派猫失败"这条被动路径。
+    //
+    // 为什么必须前置（本次修复的第二个缺口）：若只把领养挂在 depart 的 NoBuddy 分支上，
+    // 那么无猫账号只要 travel/status 报了 daily_limit_reached，流程就会在
+    // SkipDailyLimit 提前返回，**永远走不到领养**。主动探测与旅行进度解耦，才真正
+    // 做到"没有猫就去领"。
+    //
+    // 查询失败（None）时不动作：宁可这轮不领，也不能把"查不到"当成"没猫"去盲目写。
+    match fetch_has_buddy(&acc).await {
+        Some(false) => {
+            return match adopt_buddy(&acc).await {
+                AdoptOutcome::Adopted => {
+                    let mut r = depart_result(
+                        &acc,
+                        uid_ref,
+                        true,
+                        false,
+                        Some("adopted"),
+                        Some("idle"),
+                        "已领养，稍后派出",
+                    );
+                    r["claimed"] = json!(true);
+                    r["claimedAt"] = json!(now_ms());
+                    r
+                }
+                AdoptOutcome::ThresholdNotReached => depart_result(
+                    &acc,
+                    uid_ref,
+                    false,
+                    false,
+                    // 独立 skip 值且**不**列入 is_retryable_skip：门槛未达当日不再重试
+                    //（与 Go 侧 adoptTriedToday 同语义），跨日后缓存滚动会自然重试。
+                    Some("adopt-threshold"),
+                    None,
+                    "无 Buddy（领养需先积累对话轮次）",
+                ),
+                AdoptOutcome::Failed => depart_result(
+                    &acc,
+                    uid_ref,
+                    false,
+                    false,
+                    // 用可重试的 no-buddy：瞬时失败下一轮（30 分钟）再来。
+                    Some("no-buddy"),
+                    None,
+                    "无 Buddy（领养失败，稍后重试）",
+                ),
+            };
+        }
+        Some(true) => {} // 有猫：继续走旅行状态机
+        None => {}       // 查询失败：不动作，交给旅行状态机（其自身也有错误路径）
+    }
+
     let status = fetch_travel_status(&acc).await;
     if status.get("ok").and_then(Value::as_bool) != Some(true) {
         return depart_result(
@@ -945,7 +1119,11 @@ fn display_record(label: &str, result: &Value) -> Value {
 }
 
 fn display_label(same_day: bool, result: &Value) -> &'static str {
-    if result_in_flight(result) {
+    // 刚领养（本轮刚同意协议 + buddy/first 成功）：尚未派出，既不是 traveling
+    // 也不该显示成"今日已完成旅行"，单独给一个标签让用户知道猫已经到手了。
+    if same_day && result.get("skip").and_then(Value::as_str) == Some("adopted") {
+        "adopted"
+    } else if result_in_flight(result) {
         "traveling"
     } else if same_day && result.get("skip").and_then(Value::as_str) == Some("no-buddy") {
         "no-buddy"
@@ -1036,6 +1214,54 @@ mod tests {
         assert!(is_retryable_skip(Some("status-error")));
         assert!(!is_retryable_skip(Some("daily-limit")));
         assert!(!is_retryable_skip(None));
+    }
+
+    /// 领养门槛未达当日不重试（与 Go 侧 adoptTriedToday 同语义）。
+    ///
+    /// 若把它列入可重试，30 分钟一轮的巡检会整天对上游重试同一个必然失败的请求。
+    /// 跨日后缓存滚动（roll_cache_to_today 丢掉非在途记录）会自然重试。
+    #[test]
+    fn adopt_threshold_is_terminal_for_the_day() {
+        assert!(!is_retryable_skip(Some("adopt-threshold")));
+    }
+
+    /// 领养失败（非门槛原因，如瞬时网络错误）应可重试，用 no-buddy 这个可重试值。
+    #[test]
+    fn adopt_failure_stays_retryable() {
+        assert!(is_retryable_skip(Some("no-buddy")));
+    }
+
+    /// 领养门槛关键词判定：必须能识别上游 400 的文案，且不误伤其他错误。
+    #[test]
+    fn detects_buddy_task_incomplete_marker() {
+        assert!(is_buddy_task_incomplete(&json!({
+            "code": 400,
+            "msg": "first_buddy task not completed yet"
+        })));
+        // message 字段同样识别；大小写不敏感
+        assert!(is_buddy_task_incomplete(&json!({
+            "code": 400,
+            "message": "First_Buddy Task Not Completed Yet"
+        })));
+        // 其他业务错误不应被当成门槛未达（否则会被当日封口，不再重试）
+        assert!(!is_buddy_task_incomplete(&json!({"code": 500, "msg": "internal error"})));
+        assert!(!is_buddy_task_incomplete(&json!({"code": 400, "msg": "invalid param"})));
+        assert!(!is_buddy_task_incomplete(&json!({})));
+    }
+
+    /// 刚领养的记录不能被当成「旅行中」：界面会显示成倒计时在途，与事实不符。
+    #[test]
+    fn adopted_is_not_shown_as_traveling() {
+        let adopted = json!({
+            "ok": true,
+            "claimed": true,
+            "skip": "adopted",
+            "state": "idle",
+        });
+        assert!(!result_in_flight(&adopted), "领养成功不应被判为在途");
+        assert_eq!(display_label(true, &adopted), "adopted");
+        // 跨天后不再是"刚领养"，回落为普通未旅行
+        assert_eq!(display_label(false, &adopted), "untraveled");
     }
 
     #[test]

@@ -1191,11 +1191,25 @@ pub async fn gateway_status() -> Value {
 }
 
 /// 按配置自动启动（供启动流程调用）。
+///
+/// 只认 `auto_start` 这一个开关 —— 界面上的「随 App 启动」对应的就是它。
+///
+/// 历史缺陷（本次修复）：原实现要求 `enabled && auto_start` 同时为真，但 `enabled`
+/// 是 `default_gateway_config()` 里的遗留字段，**全仓库没有任何地方写入它**，
+/// 永远停留在默认值 false，于是条件恒不成立、网关从不自动启动 —— 正是用户反馈的
+/// 「勾了随 App 启动却从未生效」。`enabled` 与 `auto_start` 语义本就重叠
+/// （都是「要不要自动跑」），保留前者参与判定只会制造这种恒假条件，故移除。
+///
+/// 另注：本函数此前**从未被调用**（死代码），已接入 `lib.rs` 的 setup 启动流程。
 pub async fn maybe_autostart() -> Option<Value> {
     let cfg = load_gateway_config();
-    let enabled = cfg.get("enabled").and_then(Value::as_bool).unwrap_or(false);
     let auto = cfg.get("auto_start").and_then(Value::as_bool).unwrap_or(false);
-    if !(enabled && auto) {
+    if !auto {
+        return None;
+    }
+    // 已在运行（如上次退出未清理干净）时不重复启动，但仍同步一次运行态。
+    if is_running() {
+        update_runtime_state("started", None);
         return None;
     }
     match start_gateway(&cfg).await {

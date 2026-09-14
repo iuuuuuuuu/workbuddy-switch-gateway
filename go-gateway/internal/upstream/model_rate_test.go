@@ -100,17 +100,59 @@ func TestParseResetTimeVariants(t *testing.T) {
 	}
 }
 
-// 无时区后缀时按本地时区解释（上游历史上返回过裸本地时间）。
-func TestParseResetTimeNoZoneUsesLocal(t *testing.T) {
+// 无时区后缀时按**上游业务时区（CST）**解释，而不是容器本地时区。
+//
+// 实测的 6004 文案一律带 "UTC+8"，故该分支正常不会走到；保留它是容错，且必须
+// 用固定业务时区而非 time.Local —— 否则同一份响应在 +08:00 的开发机与 UTC 的
+// 容器/CI 上会得出相差 8 小时的时刻，UTC 下甚至会把尚未到期的重置点判成"已过期"。
+func TestParseResetTimeNoZoneUsesUpstreamZone(t *testing.T) {
 	body := `{"code":6004,"msg":"将在 2026-09-15 13:25:47 重置"}`
-	now := time.Date(2026, 9, 15, 10, 0, 0, 0, time.Local)
+	// now 显式用 UTC，确保断言与运行机器时区无关。
+	now := time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC)
 	got, ok := ParseResetTime(body, now)
 	if !ok {
 		t.Fatal("未解析出")
 	}
-	want := time.Date(2026, 9, 15, 13, 25, 47, 0, time.Local)
+	// CST 13:25:47 == UTC 05:25:47
+	want := time.Date(2026, 9, 15, 5, 25, 47, 0, time.UTC)
 	if !got.Equal(want) {
-		t.Errorf("got=%s want=%s（应按本地时区）", got, want)
+		t.Errorf("got=%s want=%s（无时区后缀应按 CST=UTC+8 解释）",
+			got.UTC().Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+}
+
+// 解析结果不得随运行机器时区变化。
+//
+// 本项目踩过的真实坑：同一份代码在 +08:00 的本机通过、在 UTC 的 CI 失败。
+// 这里用同一个瞬时的多种时区表示去解析，断言得到同一结果。
+func TestParseResetTimeIsTimezoneIndependent(t *testing.T) {
+	const body = `{"code":6004,"msg":"将在 2026-09-15 13:25:47 UTC+8 重置"}`
+
+	// 同一个瞬时（2026-09-15 02:00:00 UTC），用不同 Location 表示。
+	instant := time.Date(2026, 9, 15, 2, 0, 0, 0, time.UTC)
+	zones := []*time.Location{
+		time.UTC,
+		time.FixedZone("CST", 8*3600),
+		time.FixedZone("EST", -5*3600),
+	}
+	var first time.Time
+	for i, loc := range zones {
+		got, ok := ParseResetTime(body, instant.In(loc))
+		if !ok {
+			t.Fatalf("zone %s: 未解析出（不应随机器时区变化）", loc)
+		}
+		if i == 0 {
+			first = got
+			continue
+		}
+		if !got.Equal(first) {
+			t.Errorf("zone %s: got=%s，与 UTC 下结果 %s 不一致",
+				loc, got.UTC().Format(time.RFC3339), first.UTC().Format(time.RFC3339))
+		}
+	}
+	// 且必须是该瞬时之后的未来时刻：CST 13:25:47 == UTC 05:25:47 > 02:00
+	if want := time.Date(2026, 9, 15, 5, 25, 47, 0, time.UTC); !first.Equal(want) {
+		t.Errorf("结果=%s want=%s", first.UTC().Format(time.RFC3339), want.Format(time.RFC3339))
 	}
 }
 

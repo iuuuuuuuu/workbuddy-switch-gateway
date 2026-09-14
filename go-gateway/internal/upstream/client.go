@@ -94,15 +94,27 @@ const modelRateCode = 6004
 //	您的使用量已超出频率限制，将在 2026-09-15 13:25:47 UTC+8 重置，您也可以切换其他模型继续使用。
 //
 // 捕获组 1 = 时间字面量（日期 + 时间），捕获组 2 = 时区后缀（如 "UTC+8" / "UTC+08:00"）。
-// 时区后缀可选：上游换成 RFC3339 或纯本地时间时，退化为按本地时区解释。
+// 时区后缀可选，仅为容错：**实测到的上游文案一律带 "UTC+8"**，无后缀分支尚未在真实
+// 响应中观察到。保留它是为了上游改格式时不至于整个解析失败。
 var resetTimeRe = regexp.MustCompile(`(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})(?:\s*(UTC[+-]\d{1,2}(?::\d{2})?|Z))?`)
+
+// upstreamZone 上游（CodeBuddy 国服）的业务时区，用于解释**无时区后缀**的时间字面量。
+//
+// 为什么不用 time.Local：上游是国服服务，其自然日/重置时刻都按 CST（UTC+8）计；
+// 用容器本地时区解释会让同一份响应在开发机（+08:00）与 UTC 容器上得出相差 8 小时的
+// 结果，UTC 下极端情况会把尚未到期的重置点误判成"已过期"而退化成固定软冷却。
+// 与 scheduler 的 cstZone 同一口径（中国无夏令时，固定 +8，不依赖 tzdata）。
+//
+// 注意：这是**防御性**选择 —— 真实的 6004 文案都带 "UTC+8"，故该分支正常不会走到；
+// 带后缀时一律以文案里的偏移为准，不受本变量影响。
+var upstreamZone = time.FixedZone("CST", 8*60*60)
 
 // ParseResetTime 从上游报错文案里解析「重置时刻」；解析不出返回零值与 false。
 //
 // 时区处理：
-//   - "UTC+8" / "UTC+08:00" → 固定偏移（上游实测用的就是这种）
-//   - "Z" / 无后缀但带 Z    → UTC
-//   - 无时区后缀            → 按本地时区解释（上游历史上返回过裸本地时间）
+//   - "UTC+8" / "UTC+08:00" → 固定偏移（**实测文案用的就是这种**）
+//   - "Z"                   → UTC
+//   - 无时区后缀 / 后缀非法  → 按上游业务时区（CST）解释，而非容器本地时区（见 upstreamZone）
 //
 // 只返回**未来**的时刻：解析出过去的时间说明文案里的重置点已过（如重放旧日志），
 // 此时返回 false 交给调用方回退固定冷却，避免写入一个立即失效的冷却。
@@ -117,13 +129,13 @@ func ParseResetTime(body string, now time.Time) (time.Time, bool) {
 	var loc *time.Location
 	switch tz := strings.TrimSpace(m[2]); {
 	case tz == "":
-		loc = time.Local
+		loc = upstreamZone
 	case tz == "Z":
 		loc = time.UTC
 	default:
 		loc = parseUTCOffset(tz)
 		if loc == nil {
-			loc = time.Local
+			loc = upstreamZone
 		}
 	}
 	ts, err := time.ParseInLocation(layout, literal, loc)

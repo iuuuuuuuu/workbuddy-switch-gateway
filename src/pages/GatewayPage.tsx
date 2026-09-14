@@ -1003,10 +1003,17 @@ export default function GatewayPage() {
 
             <div className="grid gap-4 border-t border-border/50 pb-2 pt-3 sm:grid-cols-2">
               <div className="min-w-0">
-                <div className="px-4 text-[12px] font-medium text-muted-foreground sm:px-5">按模型</div>
-                <div className="mt-1">
+                <div className="px-4 text-[12px] font-medium text-muted-foreground sm:px-5">
+                  按模型
                   {usageModels.length > 0 ? (
-                    usageModels.slice(0, 5).map((model) => (
+                    <span className="ml-1.5 font-normal text-muted-foreground/70">
+                      共 {usageModels.length} 个
+                    </span>
+                  ) : null}
+                </div>
+                <div className="mt-1 max-h-72 overflow-y-auto">
+                  {usageModels.length > 0 ? (
+                    usageModels.map((model) => (
                       <UsageBarRow
                         key={model.key}
                         label={model.key}
@@ -1021,10 +1028,23 @@ export default function GatewayPage() {
                 </div>
               </div>
               <div className="min-w-0">
-                <div className="px-4 text-[12px] font-medium text-muted-foreground sm:px-5">按账号</div>
-                <div className="mt-1">
+                <div className="px-4 text-[12px] font-medium text-muted-foreground sm:px-5">
+                  按账号
                   {usageAccounts.length > 0 ? (
-                    usageAccounts.slice(0, 5).map((account) => (
+                    <span className="ml-1.5 font-normal text-muted-foreground/70">
+                      共 {usageAccounts.length} 个
+                    </span>
+                  ) : null}
+                </div>
+                {/*
+                  这里**不能**截断成前 5 个：账号池的均衡效果正是靠这个列表观察的。
+                  原先写死 slice(0, 5)，导致 8 个账号都在正常轮转、界面却只显示 5 个，
+                  用户据此误判「负载均衡只用到 5 个账号」。
+                  改为全量展示并加滚动上限（高度受限，避免账号多时把页面撑得过长）。
+                */}
+                <div className="mt-1 max-h-72 overflow-y-auto">
+                  {usageAccounts.length > 0 ? (
+                    usageAccounts.map((account) => (
                       <UsageBarRow
                         key={account.key}
                         label={usageNickname.get(account.key) ?? `${account.key.slice(0, 8)}…`}
