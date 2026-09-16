@@ -725,6 +725,12 @@ type ModelInfo struct {
 	ContextWindow int64    // = maxInputTokens
 	MaxTokens     int64    // = maxOutputTokens
 	Efforts       []string // reasoning.supportedEfforts（空=未知/固定档）
+	// DefaultEffort 上游给的默认思考档 = reasoning.effort（空=未声明）。
+	//
+	// 与 Efforts 分开：Efforts 是「允许哪些档」，DefaultEffort 是「不指定时用哪档」。
+	// 上游同时给了两者，但默认档未必在 supportedEfforts 里（上游数据未保证），
+	// 因此不要用它去推断 Efforts，也不要用 Efforts[0] 去冒充它。
+	DefaultEffort string
 	// SupportsImages 是否接受图片输入。
 	//
 	// nil **不等于** false：上游 /v3/config 只给对话模型写 supportsImages，
@@ -865,6 +871,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 			ContextWindow: m.MaxInputTokens,
 			MaxTokens:     m.MaxOutputTokens,
 			Efforts:       m.Reasoning.SupportedEfforts,
+			DefaultEffort: m.Reasoning.Effort,
 			// 账号级多模态开关为 true 时强制降级为 false：上游语义是
 			// 「即便模型本身支持，该账号也不许用图片」，此时不能宣称支持。
 			SupportsImages: effectiveSupportsImages(m.SupportsImages, m.DisabledMultimodal),

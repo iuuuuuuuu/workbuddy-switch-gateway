@@ -181,6 +181,11 @@ func TestFetchModelsEffortsDriveBodyDowngrade(t *testing.T) {
 	if len(infos[0].Efforts) != 2 || infos[0].Efforts[0] != "low" {
 		t.Errorf("infos[0].Efforts=%v", infos[0].Efforts)
 	}
+	// ModelInfo.DefaultEffort 应携带 reasoning.effort（原先解析后无人读取，是死字段）。
+	// 它只用于下发给客户端「不指定时上游用哪档」，不参与降级判断。
+	if infos[0].DefaultEffort != "high" {
+		t.Errorf("infos[0].DefaultEffort=%q want \"high\"（上游 reasoning.effort）", infos[0].DefaultEffort)
+	}
 
 	// glm-5.2 只支持 low/high，请求 max → 降级为 high
 	rc, status, _, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","reasoning_effort":"max","messages":[]}`))

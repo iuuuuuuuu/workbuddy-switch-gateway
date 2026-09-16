@@ -355,6 +355,54 @@ func modelCapabilityFields(supportsImages *bool) map[string]any {
 	}
 }
 
+// modelReasoningFields 生成思考等级（reasoning effort）字段。
+//
+// 与 modelCapabilityFields 是**正交**的两个维度（一个是「能不能收图」，一个是
+// 「思考用哪档」），因此独立成函数、独立调用，不合并成一个 map。
+//
+// efforts 为空 = 上游未声明（含固定档模型、静态兜底表）→ 返回 nil，不下发任何键。
+// 这与图片能力的三态语义一致：宁可不写，也不要凭空编造档位 —— 客户端会拿着
+// 编造的档位去发请求，而该档位要么被上游降级、要么被忽略，用户看到的是
+// 「我明明调了 max 却没生效」这类无从排查的现象。
+//
+// 一次下发**多种拼写**的理由与图片能力相同：各客户端读的字段名不统一，且没有
+// 统一约定（实测 2026-09-16）。所有已知解析器都只取自己认识的键，多余键不会报错。
+//
+//	OpenAI 风格     → supported_efforts / reasoning_efforts
+//	OpenRouter 风格 → reasoning.supported_efforts / reasoning.default_effort
+//	通用容错        → supportedEfforts / reasoningEfforts / defaultEffort
+//
+// 默认档只在 defaultEffort 非空时下发。**不要**用 efforts[0] 之类的猜测填充：
+// 上游没声明默认档时，网关也不知道，编一个反而误导。
+func modelReasoningFields(efforts []string, defaultEffort string) map[string]any {
+	if len(efforts) == 0 {
+		return nil
+	}
+	// 复制一份：efforts 来自动态模型缓存（ModelInfo.Efforts），是共享切片。
+	// 直接塞进响应 map 会让调用方对返回值的任何 in-place 修改污染缓存。
+	list := make([]string, len(efforts))
+	copy(list, efforts)
+
+	nested := map[string]any{"supported_efforts": list}
+	out := map[string]any{
+		// 主拼写：OpenAI / 多数客户端。
+		"supported_efforts": list,
+		// 容错拼写。
+		"supportedEfforts":  list,
+		"reasoning_efforts": list,
+		"reasoningEfforts":  list,
+		// OpenRouter 风格：嵌套在 reasoning 对象下。
+		"reasoning": nested,
+	}
+	if d := strings.TrimSpace(defaultEffort); d != "" {
+		nested["default_effort"] = d
+		out["default_effort"] = d
+		out["defaultEffort"] = d
+		out["default_reasoning_effort"] = d
+	}
+	return out
+}
+
 // modelList 动态获取模型列表并包装成 OpenAI 格式（含 context_length）。
 func (h *Handler) modelList() []map[string]any {
 	if infos := h.fetchDynamicModels(); len(infos) > 0 {
@@ -373,6 +421,9 @@ func (h *Handler) modelList() []map[string]any {
 				entry["context_length"] = 131072 // 兜底
 			}
 			for k, v := range modelCapabilityFields(mi.SupportsImages) {
+				entry[k] = v
+			}
+			for k, v := range modelReasoningFields(mi.Efforts, mi.DefaultEffort) {
 				entry[k] = v
 			}
 			seen[mi.ID] = true
