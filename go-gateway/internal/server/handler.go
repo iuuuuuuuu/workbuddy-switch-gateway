@@ -182,8 +182,29 @@ func (h *Handler) recordUsage(s *chatStat) {
 	h.cfg.Usage.Record(s.uid, s.model, s.counters)
 }
 
+// withImageCapability 给静态表条目补上能力字段。
+//
+// 静态表取自 /v3/config 的 agents[cli].models，实测（2026-09-16，国服 16 个
+// cli 模型 + 国际版 21 个模型池）该清单下**全部**模型 supportsImages=true，
+// 因此统一标注为支持图片。
+//
+// 只影响「上游不可达、回退静态表」时的结果：动态拉取成功时用上游真值。
+// 不标注的话，回退期间客户端会把所有模型当纯文本 —— 图片能力整个消失，
+// 而这恰恰是最难排查的一类问题（网关看起来完全正常）。
+func withImageCapability(entries []map[string]any) []map[string]any {
+	yes := true
+	for _, m := range entries {
+		for k, v := range modelCapabilityFields(&yes) {
+			if _, exists := m[k]; !exists {
+				m[k] = v
+			}
+		}
+	}
+	return entries
+}
+
 // 静态 CN 模型表（api-reference §5，动态接口失败时的回退）。
-var staticModels = []map[string]any{
+var staticModels = withImageCapability([]map[string]any{
 	{"id": "glm-5.2", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
 	{"id": "glm-5.1", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
 	{"id": "glm-5v-turbo", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
@@ -194,7 +215,7 @@ var staticModels = []map[string]any{
 	{"id": "hy3-preview-agent", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
 	{"id": "deepseek-v4-pro", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
 	{"id": "deepseek-v4-flash", "object": "model", "created": 1753600000, "owned_by": "workbuddy", "context_length": 131072},
-}
+})
 
 // staticModelsIntl 国际版静态模型表（动态接口失败时的回退）。
 //
@@ -214,7 +235,7 @@ var staticModels = []map[string]any{
 //
 //	国服   deepseek-v4-flash   / glm-5.2 / kimi-k2.7 / minimax-m3
 //	国际版 deepseek-v4.1-flash / glm-5.3 / kimi-k3   / gpt-5.6-* / gemini-3.5-flash
-var staticModelsIntl = []map[string]any{
+var staticModelsIntl = withImageCapability([]map[string]any{
 	{"id": "default-model", "object": "model", "created": 1753600000, "owned_by": "workbuddy-intl", "context_length": 200000},
 	{"id": "fast-model", "object": "model", "created": 1753600000, "owned_by": "workbuddy-intl", "context_length": 200000},
 	{"id": "balanced-model", "object": "model", "created": 1753600000, "owned_by": "workbuddy-intl", "context_length": 256000},
@@ -236,7 +257,7 @@ var staticModelsIntl = []map[string]any{
 	{"id": "kimi-k3", "object": "model", "created": 1753600000, "owned_by": "workbuddy-intl", "context_length": 1000000},
 	{"id": "kimi-k2.8-preview", "object": "model", "created": 1753600000, "owned_by": "workbuddy-intl", "context_length": 300000},
 	{"id": "kimi-k2.6", "object": "model", "created": 1753600000, "owned_by": "workbuddy-intl", "context_length": 256000},
-}
+})
 
 // staticModelsAll 合并两个区域的模型（按 id 去重，国服优先）。
 //
@@ -278,6 +299,62 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// modelCapabilityFields 生成模型能力字段（图片输入等）。
+//
+// 为什么一次下发**多种拼写**：客户端读的字段名各不相同，且都只在各自的
+// provider 专用解析器里读，没有统一约定（实测 2026-09-16，见各客户端源码）：
+//
+//	OpenClaw   OpenAI Codex  → input_modalities / inputModalities
+//	OpenClaw   Copilot       → capabilities.supports.vision
+//	OpenClaw   HuggingFace   → architecture.input_modalities
+//	OpenClaw   OpenRouter    → architecture.modality（"text+image->text"）
+//	OpenClaw   Vercel AI GW  → tags 含 "vision"
+//	OpenClaw   LM Studio     → capabilities.vision
+//	ZCode      /v1/models    → 只读 id / supported_formats（不读能力字段）
+//	DSH        /v1/models    → 只读 id/name/context/maxTokens（不读能力字段）
+//
+// 多写几种是安全的：所有已知解析器都只取自己认识的键，遇到多余键不会报错
+// （OpenClaw 的 Copilot 解析器只额外要求 object=="model"，本函数已保证）。
+// 这样 OpenClaw 等能读该字段的客户端可直接受益，其余客户端行为不变。
+//
+// supportsImages 为 nil（上游未声明）时**不下发**任何能力字段：宁可不写，
+// 也不要谎报成纯文本 —— 后者会让本可用的图片能力被客户端主动关掉。
+func modelCapabilityFields(supportsImages *bool) map[string]any {
+	if supportsImages == nil {
+		return nil
+	}
+	if !*supportsImages {
+		// 显式不支持：明确告知，避免客户端按「默认支持」处理。
+		return map[string]any{
+			"supportsImages": false,
+			"capabilities":   map[string]any{"vision": false, "supports": map[string]any{"vision": false}},
+		}
+	}
+	return map[string]any{
+		"supportsImages": true,
+		// OpenClaw OpenAI Codex：接受 "image"/"vision" 两种写法。
+		"input_modalities": []string{"text", "image"},
+		"inputModalities":  []string{"text", "image"},
+		// OpenClaw Copilot / LM Studio。
+		"capabilities": map[string]any{
+			"vision":   true,
+			"supports": map[string]any{"vision": true},
+		},
+		// OpenClaw HuggingFace / OpenRouter。
+		"architecture": map[string]any{
+			"input_modalities": []string{"text", "image"},
+			"modality":         "text+image->text",
+		},
+		// OpenClaw Vercel AI Gateway。
+		"tags": []string{"vision"},
+		// ZCode 自身配置用的词汇（对 /v1/models 无消费方，但无副作用且便于人读）。
+		"modalities": map[string]any{
+			"input":  []string{"text", "image"},
+			"output": []string{"text"},
+		},
+	}
+}
+
 // modelList 动态获取模型列表并包装成 OpenAI 格式（含 context_length）。
 func (h *Handler) modelList() []map[string]any {
 	if infos := h.fetchDynamicModels(); len(infos) > 0 {
@@ -294,6 +371,9 @@ func (h *Handler) modelList() []map[string]any {
 			}
 			if mi.ContextWindow == 0 {
 				entry["context_length"] = 131072 // 兜底
+			}
+			for k, v := range modelCapabilityFields(mi.SupportsImages) {
+				entry[k] = v
 			}
 			seen[mi.ID] = true
 			out = append(out, entry)

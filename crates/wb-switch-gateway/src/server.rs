@@ -253,6 +253,56 @@ fn status_to_json(s: &crate::pool::Status) -> Value {
     Value::Object(m)
 }
 
+/// 生成模型能力字段（图片输入等）。与 Go 侧 `modelCapabilityFields` 保持一致。
+///
+/// 为什么一次下发**多种拼写**：客户端读的字段名各不相同，且都只在各自的
+/// provider 专用解析器里读，没有统一约定（实测 2026-09-16，见各客户端源码）：
+///
+/// - OpenClaw OpenAI Codex → `input_modalities` / `inputModalities`
+/// - OpenClaw Copilot → `capabilities.supports.vision`
+/// - OpenClaw HuggingFace → `architecture.input_modalities`
+/// - OpenClaw OpenRouter → `architecture.modality`（`"text+image->text"`）
+/// - OpenClaw Vercel AI Gateway → `tags` 含 `"vision"`
+/// - OpenClaw LM Studio → `capabilities.vision`
+/// - ZCode / DSH 的 `/v1/models` 解析器只读 id/context 等，不读能力字段
+///
+/// 多写几种是安全的：已知解析器都只取自己认识的键，多余键不会报错。
+fn image_capability_fields() -> Value {
+    json!({
+        "supportsImages": true,
+        "input_modalities": ["text", "image"],
+        "inputModalities": ["text", "image"],
+        "capabilities": { "vision": true, "supports": { "vision": true } },
+        "architecture": {
+            "input_modalities": ["text", "image"],
+            "modality": "text+image->text",
+        },
+        "tags": ["vision"],
+        "modalities": { "input": ["text", "image"], "output": ["text"] },
+    })
+}
+
+/// 给静态表条目补上能力字段。
+///
+/// 静态表取自 `/v3/config` 的 `agents[cli].models`，实测（2026-09-16，国服 16 个
+/// cli 模型 + 国际版 21 个模型池）该清单下**全部**模型 `supportsImages=true`。
+///
+/// 本 crate 目前只内置静态表（无动态拉取），因此统一标注为支持图片。
+/// 不标注的话，客户端会把所有模型当纯文本 —— 图片能力整个消失，而网关
+/// 看起来完全正常（返回 200 + 完整列表），是最难排查的一类问题。
+fn with_image_capability(mut entries: Vec<Value>) -> Vec<Value> {
+    for entry in entries.iter_mut() {
+        if let Some(obj) = entry.as_object_mut() {
+            if let Some(caps) = image_capability_fields().as_object() {
+                for (k, v) in caps {
+                    obj.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
+        }
+    }
+    entries
+}
+
 /// 静态 CN 模型表（动态接口失败时的回退）。
 ///
 /// 与 Go 侧 `staticModels` 完全一致（含 created / context_length 取值）。
@@ -269,17 +319,19 @@ fn static_models_cn() -> Vec<Value> {
         "deepseek-v4-pro",
         "deepseek-v4-flash",
     ];
-    IDS.iter()
-        .map(|id| {
-            json!({
-                "id": id,
-                "object": "model",
-                "created": 1753600000,
-                "owned_by": "workbuddy",
-                "context_length": 131072,
+    with_image_capability(
+        IDS.iter()
+            .map(|id| {
+                json!({
+                    "id": id,
+                    "object": "model",
+                    "created": 1753600000,
+                    "owned_by": "workbuddy",
+                    "context_length": 131072,
+                })
             })
-        })
-        .collect()
+            .collect(),
+    )
 }
 
 /// 国际版静态模型表。
@@ -324,7 +376,7 @@ fn static_models_intl() -> Vec<Value> {
             "owned_by": "workbuddy-intl", "context_length": 131072,
         }));
     }
-    out
+    with_image_capability(out)
 }
 
 /// 合并两个区域的模型（按 id 去重，国服优先）。
@@ -531,6 +583,57 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), n, "模型 id 应去重");
+    }
+
+    /// `/v1/models` 必须下发模型能力（图片输入）。
+    ///
+    /// 实测缺陷（2026-09-16）：模型列表只有 id/object/created/owned_by/context_length，
+    /// 没有任何能力字段，于是「有多模态模型但客户端发不出图片」。能读该字段的
+    /// 客户端（OpenClaw 的 Codex/Copilot/HuggingFace/OpenRouter/Vercel/LM Studio
+    /// 解析器）拿不到能力信号，只能按纯文本处理 —— 构建期完全看不出来。
+    #[tokio::test]
+    async fn models_expose_image_capability_spellings() {
+        let app = router(test_state(""));
+        let res = app
+            .oneshot(Request::builder().uri("/v1/models").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v = body_json(res).await;
+        let data = v["data"].as_array().unwrap();
+        let glm = data.iter().find(|m| m["id"] == "glm-5.2").unwrap();
+
+        // 各客户端读的拼写都不同，逐条锁住，避免以后有人"清理重复字段"。
+        assert_eq!(glm["supportsImages"], true);
+        for key in ["input_modalities", "inputModalities"] {
+            let mods = glm[key].as_array().expect("应为数组（OpenClaw Codex）");
+            assert!(mods.iter().any(|m| m == "image"), "{key} 应含 image");
+        }
+        assert_eq!(glm["capabilities"]["vision"], true, "OpenClaw LM Studio");
+        assert_eq!(
+            glm["capabilities"]["supports"]["vision"], true,
+            "OpenClaw Copilot"
+        );
+        assert!(
+            glm["architecture"]["input_modalities"]
+                .as_array()
+                .is_some_and(|m| m.iter().any(|x| x == "image")),
+            "OpenClaw HuggingFace"
+        );
+        assert!(
+            glm["architecture"]["modality"]
+                .as_str()
+                .is_some_and(|m| m.contains("image")),
+            "OpenClaw OpenRouter 形如 text+image->text"
+        );
+        assert!(
+            glm["tags"].as_array().is_some_and(|t| t.iter().any(|x| x == "vision")),
+            "OpenClaw Vercel AI Gateway"
+        );
+
+        // 国际版静态表条目也要带能力（两个区域共用同一套标注）
+        let astra = data.iter().find(|m| m["id"] == "gpt-6-astra").unwrap();
+        assert_eq!(astra["supportsImages"], true, "国际版条目也应带能力字段");
     }
 
     #[tokio::test]

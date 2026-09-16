@@ -1086,6 +1086,17 @@ pub fn build_dsh_settings(
             json!({
                 "id": m,
                 "name": m,
+                // 必须声明 input：DSH 的 llm-pi-ai 判据是 model.input 数组
+                // （catalog.ts：`input: declaredInput(entry.input) ?? base?.input ?? [...request.defaultInput]`），
+                // 缺省 defaultInput 是 ["text"]，于是图片被
+                // `MODEL_DOES_NOT_SUPPORT_IMAGES` 拦下。
+                //
+                // 注意不能写空数组：`declaredInput` 把 `[]` 当作「此处不作声明」
+                // 而继续回退，等于没写（这正是手工配置里 `input: []` 失效的原因）。
+                //
+                // 上游 /v3/config 的 agents[cli].models 实测全部
+                // supportsImages=true（2026-09-16），故声明 text+image。
+                "input": ["text", "image"],
                 "reasoningEfforts": { "off": null, "high": "high", "max": "max" }
             })
         })
@@ -1398,8 +1409,17 @@ pub fn build_zcode_config(
                     "context": 200000,
                     "output": 8192
                 },
+                // 必须声明 image：ZCode 由 modalities.input 推导 supportsImages
+                // （app.asar 里 `w.supportsImages = y.modalities.input.includes("image")`），
+                // 而 supportsImages=false 会让它把图片从请求里直接丢掉
+                // （zcode.cjs：`if (e.type==="image" && t?.supportsImages===!1) return "image input"`）。
+                //
+                // 原先写死 ["text"]，于是「一键接入 ZCode」后即便模型本身支持图片，
+                // ZCode 也会静默丢弃图片输入。上游 /v3/config 的 agents[cli].models
+                // 实测全部 supportsImages=true（2026-09-16，国服 16/16、国际版 21/21），
+                // 因此这里声明 text+image 与上游事实一致。
                 "modalities": {
-                    "input": ["text"],
+                    "input": ["text", "image"],
                     "output": ["text"]
                 }
             }),
@@ -1797,6 +1817,57 @@ fn replace_toml_table(text: &str, table: &str, body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 一键接入必须声明图片能力，否则接入完还是发不出图片。
+    ///
+    /// 实测缺陷（2026-09-16）：
+    ///   - ZCode 写死 `modalities.input = ["text"]`，而它由该字段推导
+    ///     `supportsImages`，为 false 时会把图片从请求里直接丢掉；
+    ///   - DSH 完全不写 `input`，其 llm-pi-ai 回退到 defaultInput=["text"]，
+    ///     图片被 `MODEL_DOES_NOT_SUPPORT_IMAGES` 拦下。
+    ///
+    /// 上游 /v3/config 的 agents[cli].models 实测全部 supportsImages=true
+    /// （国服 16/16、国际版 21/21），故两处都应声明 text+image。
+    #[test]
+    fn zcode_config_declares_image_modality() {
+        let out = build_zcode_config(None, "http://127.0.0.1:7863", "sk-x", &["glm-5.2".into()]).unwrap();
+        let v: Value = serde_json::from_str(&out).expect("ZCode 配置必须是合法 JSON");
+        let mods = &v["provider"]["workbuddy"]["models"]["glm-5.2"]["modalities"]["input"];
+        let arr = mods.as_array().expect("modalities.input 应为数组");
+        assert!(
+            arr.iter().any(|m| m == "image"),
+            "ZCode 由 modalities.input 推导 supportsImages，缺 image 会静默丢弃图片：{out}"
+        );
+        assert!(arr.iter().any(|m| m == "text"), "仍应保留 text");
+    }
+
+    /// DSH 的 input 必须是**非空**数组。
+    ///
+    /// llm-pi-ai 的 `declaredInput` 把空数组当作「此处不作声明」而继续回退到
+    /// defaultInput=["text"]，等于没写 —— 手工配置里 `input: []` 失效就是这个原因。
+    #[test]
+    fn dsh_settings_declares_non_empty_image_input() {
+        let out = build_dsh_settings(None, "http://127.0.0.1:7863", &["glm-5.2".into()]).unwrap();
+        // 回读校验：产物必须是合法 YAML，且 input 非空并含 image
+        let map = crate::modules::yaml_lite::parse_mapping(&out).expect("DSH 配置必须是合法 YAML");
+        let v = Value::Object(map);
+        let input = &v["llm-pi-ai"]["providers"]["workbuddy"]["models"][0]["input"];
+        let arr = input.as_array().expect("每个模型都应有 input 数组");
+        assert!(!arr.is_empty(), "input 不能为空数组（declaredInput 会当作未声明而回退）：{out}");
+        assert!(arr.iter().any(|m| m == "image"), "应声明 image：{out}");
+    }
+
+    /// 已存在的配置里被写成纯文本时，重新接入要能纠正过来。
+    #[test]
+    fn zcode_config_repairs_text_only_modality() {
+        let existing = r#"{"provider":{"workbuddy":{"models":{"glm-5.2":{"modalities":{"input":["text"],"output":["text"]}}}}}}"#;
+        let out = build_zcode_config(Some(existing), "http://127.0.0.1:7863", "sk-x", &["glm-5.2".into()]).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let arr = v["provider"]["workbuddy"]["models"]["glm-5.2"]["modalities"]["input"]
+            .as_array()
+            .unwrap();
+        assert!(arr.iter().any(|m| m == "image"), "旧配置里的纯文本声明应被纠正：{out}");
+    }
 
     #[test]
     fn codex_config_uses_responses_and_keeps_other_tables() {

@@ -725,6 +725,12 @@ type ModelInfo struct {
 	ContextWindow int64    // = maxInputTokens
 	MaxTokens     int64    // = maxOutputTokens
 	Efforts       []string // reasoning.supportedEfforts（空=未知/固定档）
+	// SupportsImages 是否接受图片输入。
+	//
+	// nil **不等于** false：上游 /v3/config 只给对话模型写 supportsImages，
+	// 补全/图片生成等条目整条缺失该字段。缺失时是「未声明」，不是「不支持」——
+	// 谎报成纯文本会让客户端把本可用的图片能力关掉，所以这里保留三态。
+	SupportsImages *bool
 }
 
 // modelsConfigUA 拉模型配置用的 User-Agent。
@@ -755,6 +761,25 @@ const modelsConfigUA = "WorkBuddy/5.5.2 WorkBuddy/5.5.2 CLI/2.137.1"
 // 与认证方式/请求头无关），导致国际版永远只能靠硬编码静态表。
 // /v3/config 返回同一份模型数据且两个区域都可用（实测国际版 21、国服 52）。
 const modelsConfigPath = "/v3/config"
+
+// effectiveSupportsImages 合并「模型是否支持图片」与「账号级多模态是否被禁用」。
+//
+// 三态语义（返回值可能是 nil = 未声明）：
+//
+//	supportsImages 缺失 + 未禁用 → nil（未声明，客户端按自己的默认处理）
+//	supportsImages=true        → true
+//	supportsImages=false       → false
+//	disabledMultimodal=true    → false（无条件，账号级开关优先）
+//
+// disabledMultimodal 优先是刻意的：上游用它表达「该账号不能发图片」，
+// 与模型自身能力无关，此时宣称支持会让客户端发出必然失败的请求。
+func effectiveSupportsImages(supportsImages *bool, disabledMultimodal bool) *bool {
+	if disabledMultimodal {
+		f := false
+		return &f
+	}
+	return supportsImages
+}
 
 // FetchModels 调上游模型配置接口，返回该账号所在区域的可用模型。
 //
@@ -798,7 +823,12 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 				MaxInputTokens  int64  `json:"maxInputTokens"`
 				MaxOutputTokens int64  `json:"maxOutputTokens"`
 				Disabled        bool   `json:"disabled"`
-				Reasoning       struct {
+				// 指针：区分「显式 false」与「字段缺失」（见 ModelInfo.SupportsImages）。
+				SupportsImages *bool `json:"supportsImages"`
+				// disabledMultimodal：账号级多模态开关。实测当前恒为 false/缺失，
+				// 但一旦为 true，即便 supportsImages=true 也不能收图片。
+				DisabledMultimodal bool `json:"disabledMultimodal"`
+				Reasoning          struct {
 					Effort           string   `json:"effort"`
 					SupportedEfforts []string `json:"supportedEfforts"`
 				} `json:"reasoning"`
@@ -835,6 +865,9 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 			ContextWindow: m.MaxInputTokens,
 			MaxTokens:     m.MaxOutputTokens,
 			Efforts:       m.Reasoning.SupportedEfforts,
+			// 账号级多模态开关为 true 时强制降级为 false：上游语义是
+			// 「即便模型本身支持，该账号也不许用图片」，此时不能宣称支持。
+			SupportsImages: effectiveSupportsImages(m.SupportsImages, m.DisabledMultimodal),
 		}
 		if m.Disabled {
 			disabled[m.ID] = true

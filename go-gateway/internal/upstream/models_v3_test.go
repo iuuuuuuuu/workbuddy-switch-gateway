@@ -265,6 +265,65 @@ func TestFetchModelsReportsHTTPError(t *testing.T) {
 	}
 }
 
+// TestFetchModelsParsesSupportsImages 必须解析上游的 supportsImages（三态）。
+//
+// 实测缺陷（2026-09-16）：FetchModels 的匿名结构体没有 supportsImages 字段，
+// 于是「模型是否支持图片」在网关这一层被丢掉，客户端拿不到任何能力信号。
+//
+// 三态很关键：上游只给对话模型写 supportsImages，补全/图片生成类整条缺失。
+// 缺失是「未声明」而非「不支持」—— 混为一谈会让客户端关掉本可用的能力。
+func TestFetchModelsParsesSupportsImages(t *testing.T) {
+	const body = `{"code":0,"data":{
+		"agents":[{"name":"cli","models":["m-yes","m-no","m-absent","m-mm-off"]}],
+		"models":[
+			{"id":"m-yes","supportsImages":true},
+			{"id":"m-no","supportsImages":false},
+			{"id":"m-absent"},
+			{"id":"m-mm-off","supportsImages":true,"disabledMultimodal":true}
+		]}}`
+	got, _, _, _ := fetchModelsCapturing(t, body, 200)
+	byID := map[string]ModelInfo{}
+	for _, m := range got {
+		byID[m.ID] = m
+	}
+
+	if mi, ok := byID["m-yes"]; !ok || mi.SupportsImages == nil || !*mi.SupportsImages {
+		t.Errorf("m-yes 的 SupportsImages 应为 true，实际 %v", byID["m-yes"].SupportsImages)
+	}
+	if mi, ok := byID["m-no"]; !ok || mi.SupportsImages == nil || *mi.SupportsImages {
+		t.Errorf("m-no 的 SupportsImages 应为 false，实际 %v", byID["m-no"].SupportsImages)
+	}
+	if mi, ok := byID["m-absent"]; !ok || mi.SupportsImages != nil {
+		t.Errorf("字段缺失时 SupportsImages 应为 nil（未声明 ≠ 不支持），实际 %v", byID["m-absent"].SupportsImages)
+	}
+	// disabledMultimodal 是账号级开关，优先于模型自身能力
+	if mi, ok := byID["m-mm-off"]; !ok || mi.SupportsImages == nil || *mi.SupportsImages {
+		t.Errorf("disabledMultimodal=true 时应降级为 false，实际 %v", byID["m-mm-off"].SupportsImages)
+	}
+}
+
+// TestEffectiveSupportsImages 三态合并逻辑单测。
+func TestEffectiveSupportsImages(t *testing.T) {
+	yes, no := true, false
+
+	if got := effectiveSupportsImages(nil, false); got != nil {
+		t.Errorf("未声明且未禁用应保持 nil，实际 %v", *got)
+	}
+	if got := effectiveSupportsImages(&yes, false); got == nil || !*got {
+		t.Errorf("true 且未禁用应为 true，实际 %v", got)
+	}
+	if got := effectiveSupportsImages(&no, false); got == nil || *got {
+		t.Errorf("false 应为 false，实际 %v", got)
+	}
+	// 账号级禁用无条件覆盖
+	if got := effectiveSupportsImages(&yes, true); got == nil || *got {
+		t.Errorf("disabledMultimodal 应覆盖 supportsImages=true，实际 %v", got)
+	}
+	if got := effectiveSupportsImages(nil, true); got == nil || *got {
+		t.Errorf("disabledMultimodal 对未声明也应为 false，实际 %v", got)
+	}
+}
+
 // TestFetchModelsUsesIntlBaseForIntlAccount 国际版账号要走国际版基址。
 func TestFetchModelsUsesIntlBaseForIntlAccount(t *testing.T) {
 	_, req, _, _ := fetchModelsCapturing(t, v3ConfigResponse, 200)
