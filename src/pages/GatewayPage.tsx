@@ -169,6 +169,18 @@ function maxOf(values: number[]): number {
   return values.reduce((max, value) => Math.max(max, value), 1);
 }
 
+/**
+ * 界面上标识一个账号的名字：**备注 → 上游昵称 → uid 前缀**。
+ *
+ * 为什么不直接用昵称：上游昵称对国服账号常为空，回退到 uid 只剩一串随机串，
+ * 用户根本对不上「这是谁的号」；备注是用户自己在「账号管理」里填的标签
+ * （如「公司号」「备用」），正是为这个场景准备的，所以排在最前。
+ * 两者都缺时才退到 uid 前缀，保证任何账号都有一个稳定、可点选的显示名。
+ */
+function accountLabel(account: { uid: string; nickname?: string; note?: string }): string {
+  return account.note?.trim() || account.nickname?.trim() || account.uid.slice(0, 8);
+}
+
 /** 用量分布行：名称 + 占比条 + 数值（可带底部说明）。 */
 function UsageBarRow({
   label,
@@ -853,7 +865,7 @@ export default function GatewayPage() {
   const usageNickname = useMemo(() => {
     const map = new Map<string, string>();
     for (const account of status?.accounts ?? []) {
-      map.set(account.uid, account.nickname || account.uid.slice(0, 8));
+      map.set(account.uid, accountLabel(account));
     }
     return map;
   }, [status?.accounts]);
@@ -1169,7 +1181,7 @@ export default function GatewayPage() {
                 <SelectItem value={NONE_VALUE}>（未选择）</SelectItem>
                 {(status?.accounts ?? []).map((a) => (
                   <SelectItem key={a.uid} value={a.uid}>
-                    {a.nickname || a.uid.slice(0, 8)}
+                    {accountLabel(a)}
                     {a.needsRelogin ? "（需重新登录）" : ""}
                   </SelectItem>
                 ))}
