@@ -639,6 +639,13 @@ export interface GatewayStatus {
   accounts?: Array<{
     uid: string;
     nickname?: string;
+    /**
+     * 用户自定义备注（与 `AccountMeta.note` 同源，只在本地）。
+     *
+     * 界面优先用它标识账号：上游昵称对国服账号常为空，uid 只是随机串，
+     * 备注才是用户认得出「这是谁的号」的线索。
+     */
+    note?: string;
     expiresAt?: number;
     needsRelogin?: boolean;
   }>;
