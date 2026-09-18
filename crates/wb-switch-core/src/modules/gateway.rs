@@ -634,6 +634,7 @@ static GATEWAY_RUNNING: AtomicBool = AtomicBool::new(false);
 ///
 /// `TerminateJobObject` 对空 Job 也返回成功，所以「能不能用 Job 收尾」不能靠它的返回值判断，
 /// 只能记住 `attach_child_to_job()` 当初是否登记成功。同一时刻只跟踪一个网关子进程。
+#[cfg(windows)]
 static GATEWAY_IN_JOB: AtomicBool = AtomicBool::new(false);
 
 fn proc_slot() -> &'static Mutex<Option<Child>> {
@@ -734,42 +735,28 @@ fn gateway_job() -> Option<&'static GatewayJob> {
 /// 把新启动的网关子进程纳入 Job：应用进程结束时由系统连带回收。
 ///
 /// 加入失败不阻断启动（显式 stop_gateway 仍可正常停止），只打日志提示兜底失效。
+#[cfg(windows)]
 fn attach_child_to_job(child: &Child) {
-    #[cfg(windows)]
-    {
-        match gateway_job() {
-            None => {
-                GATEWAY_IN_JOB.store(false, Ordering::SeqCst);
-                eprintln!("[gateway] Job Object 创建失败：应用异常退出时可能残留网关进程");
-            }
-            Some(job) if !job.assign(child) => {
-                GATEWAY_IN_JOB.store(false, Ordering::SeqCst);
-                eprintln!(
-                    "[gateway] 网关子进程加入 Job Object 失败：应用异常退出时可能残留网关进程"
-                )
-            }
-            Some(_) => GATEWAY_IN_JOB.store(true, Ordering::SeqCst),
+    match gateway_job() {
+        None => {
+            GATEWAY_IN_JOB.store(false, Ordering::SeqCst);
+            eprintln!("[gateway] Job Object 创建失败：应用异常退出时可能残留网关进程");
         }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = child;
+        Some(job) if !job.assign(child) => {
+            GATEWAY_IN_JOB.store(false, Ordering::SeqCst);
+            eprintln!("[gateway] 网关子进程加入 Job Object 失败：应用异常退出时可能残留网关进程")
+        }
+        Some(_) => GATEWAY_IN_JOB.store(true, Ordering::SeqCst),
     }
 }
 
 /// 用 Job Object 结束网关进程树；子进程未登记进 Job 时返回 false（调用方需回退）。
+#[cfg(windows)]
 fn terminate_gateway_job() -> bool {
-    #[cfg(windows)]
-    {
-        if !GATEWAY_IN_JOB.load(Ordering::SeqCst) {
-            return false;
-        }
-        gateway_job().map(GatewayJob::terminate).unwrap_or(false)
+    if !GATEWAY_IN_JOB.load(Ordering::SeqCst) {
+        return false;
     }
-    #[cfg(not(windows))]
-    {
-        false
-    }
+    gateway_job().map(GatewayJob::terminate).unwrap_or(false)
 }
 
 /// 网关是否在运行（本进程视角）。
@@ -1129,6 +1116,7 @@ pub async fn start_gateway(cfg: &Value) -> Result<Value, String> {
 
     let child = cmd.spawn().map_err(|e| format!("启动网关失败: {e}"))?;
     // 立即纳入 Job：之后父进程意外结束也会被系统连带终止，避免孤儿进程占端口。
+    #[cfg(windows)]
     attach_child_to_job(&child);
     *proc_slot().lock().unwrap() = Some(child);
     GATEWAY_RUNNING.store(true, Ordering::SeqCst);
@@ -1183,20 +1171,33 @@ pub async fn start_gateway(cfg: &Value) -> Result<Value, String> {
 /// 不创建任何进程，因此在「会话正在结束」的关机 / 注销路径上也不会失败。
 /// 此前无条件 spawn `taskkill`，关机时控制台子系统已拆除，`taskkill` 会以
 /// `0xc0000142`（STATUS_DLL_INIT_FAILED）启动失败并弹出系统错误框，用户必须手动点掉。
-/// 仅在子进程没能登记进 Job（Job 创建 / 加入失败）时才回退到 `taskkill`。
+///
+/// 回退路径按平台区分：Windows 用 `taskkill /F /T`（连带子进程树），其余平台
+/// 用 `Child::kill`。非 Windows 上必须走 `Child::kill` —— `taskkill` 在那里不存在，
+/// 而 spawn 失败的错误被丢弃后 `child.wait()` 会**永久阻塞**：网关是常驻服务，
+/// 自己不会退出。该卡死会让停止/重启网关、以及退出时的回收全部挂住。
 pub fn stop_gateway() -> Value {
     let mut slot = proc_slot().lock().unwrap();
     let stopped = match slot.as_mut() {
         Some(child) => {
-            let pid = child.id();
-            if !terminate_gateway_job() {
-                // 回退：Windows 需连同子进程树一起结束；走 cmd_builder 加 CREATE_NO_WINDOW，
-                // 避免退出/停止时闪出 taskkill 控制台窗口。
-                let _ = crate::modules::process::cmd_builder("taskkill")
-                    .args(["/F", "/T", "/PID", &pid.to_string()])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
+            #[cfg(windows)]
+            {
+                if !terminate_gateway_job() {
+                    // 回退：Windows 需连同子进程树一起结束；走 cmd_builder 加 CREATE_NO_WINDOW，
+                    // 避免退出/停止时闪出 taskkill 控制台窗口。
+                    let pid = child.id();
+                    let _ = crate::modules::process::cmd_builder("taskkill")
+                        .args(["/F", "/T", "/PID", &pid.to_string()])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                // 非 Windows 没有 Job Object，也没有 taskkill，只能直接结束进程。
+                // 网关不会自己拉起子进程，因此无需处理进程树。
+                let _ = child.kill();
             }
             let _ = child.wait();
             true
@@ -1204,6 +1205,7 @@ pub fn stop_gateway() -> Value {
         None => false,
     };
     *slot = None;
+    #[cfg(windows)]
     GATEWAY_IN_JOB.store(false, Ordering::SeqCst);
     GATEWAY_RUNNING.store(false, Ordering::SeqCst);
     json!({ "stopped": stopped })
@@ -1666,6 +1668,15 @@ pub async fn fetch_usage(days: Option<i64>) -> Value {
 mod tests {
     use super::*;
 
+    /// 串行化所有触碰进程级全局状态的测试。
+    ///
+    /// 单例 Job、`GATEWAY_IN_JOB`、`proc_slot()` 都是**进程级**的，而 cargo test
+    /// 默认多线程跑同一个二进制。若并行执行，一个测试把 `GATEWAY_IN_JOB` 置 true
+    /// 后，另一个测试的 `stop_gateway()` 就会去终止单例 Job（里面没有它的子进程），
+    /// 结果漏杀并卡在 `child.wait()`。持锁的测试必须 `_guard` 绑定到变量上，
+    /// 否则锁会立刻释放。
+    static GLOBAL_STATE_LOCK: Mutex<()> = Mutex::new(());
+
     // 回归保护：局部更新（如启动后回写 last_status）不得覆盖用户设置。
     // 曾经的缺陷是 merge 以「默认值」为基准，导致 api_key / listen 被重置，
     // 前端账号池查询因此带上空 key 而显示为空。
@@ -2116,6 +2127,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn attach_child_registers_with_singleton_job() {
+        let _guard = GLOBAL_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut child = spawn_probe_child();
         let Some(job) = super::gateway_job() else {
             // 环境不支持 Job Object 时跳过；显式 stop_gateway 仍然有效。
@@ -2155,6 +2167,101 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn child")
+    }
+
+    /// 探针进程（跨平台）：长跑、可被杀，且 stdout 接管道。
+    ///
+    /// 接管道是为了拿到一个与平台无关的存活信号：进程退出时写端关闭，读端读到
+    /// EOF。这样在 Windows 与 macOS/Linux 上都能验证「进程真的死了」，不必依赖
+    /// tasklist / ps / /proc。
+    ///
+    /// 刻意不经 shell 包装（Windows 直接用 `ping`，不经 `cmd /C`）：若中间隔一层
+    /// 壳，被杀的是壳进程，真正长跑的孙进程仍持有管道写端，EOF 永远不会到来 ——
+    /// 那会让「已终止」的判定失效。
+    fn spawn_probe_child_piped() -> Child {
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut c = Command::new("ping");
+            c.args(["-n", "60", "127.0.0.1"]);
+            c
+        };
+        #[cfg(not(windows))]
+        let mut cmd = {
+            let mut c = Command::new("sleep");
+            c.arg("60");
+            c
+        };
+        cmd.stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn child")
+    }
+
+    /// 等待管道读到 EOF（即进程已退出）；超时返回 false。
+    ///
+    /// 调用方需在此之前 `take()` 出 stdout 并交给本函数。
+    fn wait_pipe_eof(mut stdout: std::process::ChildStdout, timeout: std::time::Duration) -> bool {
+        use std::io::Read;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut sink = Vec::new();
+            let _ = stdout.read_to_end(&mut sink); // 进程退出 -> EOF -> 返回
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(timeout).is_ok()
+    }
+
+    // 跨平台回归：stop_gateway 必须真的结束子进程，且**不能阻塞**。
+    //
+    // 回归背景：非 Windows 分支原先无条件 spawn `taskkill`（macOS/Linux 上不存在），
+    // spawn 失败的错误被 `let _ =` 丢弃，随后 `child.wait()` 永久阻塞 —— 网关是常驻
+    // 服务，自己不会退出。该卡死会挂住停止/重启网关以及退出时的回收。
+    //
+    // 两道断言各自对应一种坏实现：
+    //   1) stop_gateway 放进子线程 + 超时：若它再次阻塞，测试失败而不是一起挂死；
+    //      这也正是「没杀掉进程」的直接表现。
+    //   2) 管道 EOF：若实现改成「不杀也不等、直接返回」，这里会因进程仍存活而失败。
+    #[test]
+    fn stop_gateway_terminates_child_without_blocking() {
+        use std::time::Duration;
+        let _guard = GLOBAL_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut child = spawn_probe_child_piped();
+        let stdout = child.stdout.take().expect("stdout 应已接管道");
+        assert!(
+            child.try_wait().expect("try_wait").is_none(),
+            "探针进程应处于运行中"
+        );
+
+        // 与生产路径一致：start_gateway 也是先登记进 Job 再放入槽。
+        // 不登记的话，Windows 上 GATEWAY_IN_JOB 可能已被并行测试置为 true，
+        // 导致 stop_gateway 去终止单例 Job（不含本探针）而漏杀。
+        #[cfg(windows)]
+        super::attach_child_to_job(&child);
+
+        *super::proc_slot().lock().unwrap() = Some(child);
+        super::GATEWAY_RUNNING.store(true, Ordering::SeqCst);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(super::stop_gateway());
+        });
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(v) => assert_eq!(v["stopped"], true, "已装入子进程时应报告 stopped=true"),
+            Err(_) => panic!(
+                "stop_gateway 超时未返回：子进程未被结束，child.wait() 阻塞（网关是常驻服务，不会自行退出）"
+            ),
+        }
+
+        assert!(!super::is_running(), "stop_gateway 后运行标志应清零");
+        assert!(
+            super::proc_slot().lock().unwrap().is_none(),
+            "stop_gateway 后进程槽应清空"
+        );
+        assert!(
+            wait_pipe_eof(stdout, Duration::from_secs(5)),
+            "stop_gateway 返回后子进程仍存活（管道未 EOF）"
+        );
     }
 
     /// 轮询等待子进程退出；超时即强杀并 panic，`what` 指明是哪一步没生效。
@@ -2200,6 +2307,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn registered_child_is_stopped_via_job_not_taskkill() {
+        let _guard = GLOBAL_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut child = spawn_probe_child();
         super::attach_child_to_job(&child);
         if !super::GATEWAY_IN_JOB.load(Ordering::SeqCst) {
