@@ -1,0 +1,61 @@
+200	""	none
+400	""	client
+401	""	client
+402	""	hard_credit
+403	""	client
+404	""	not_found
+418	""	client
+429	""	soft_rate
+500	""	server
+502	""	server
+503	""	server
+302	""	none
+200	"insufficient credit"	hard_credit
+200	"Insufficient Credit"	hard_credit
+200	"insufficient credits"	hard_credit
+200	"no credits left"	hard_credit
+200	"Credits exhausted. Please visit the link below to purchase add-on packs and get more credits: …"	hard_credit
+200	"credit exhausted"	hard_credit
+200	"credit exhaustion"	hard_credit
+200	"credits exhaustion"	hard_credit
+200	"out of credits"	hard_credit
+200	"quota exceeded"	hard_credit
+500	"quota exhaust"	hard_credit
+200	"payment required"	hard_credit
+200	"Credit Not Enough"	hard_credit
+200	"not enough credits"	hard_credit
+200	"credits used up"	hard_credit
+200	"积分不足"	hard_credit
+200	"您的积分不足"	hard_credit
+200	"额度不足"	hard_credit
+200	"余额不足"	hard_credit
+200	"积分用完"	hard_credit
+200	"额度用尽"	hard_credit
+200	"没有积分"	hard_credit
+401	"12153 余额不足"	hard_credit
+401	"{\"code\":12153,\"msg\":\"Offline user session not found\"}"	session_dead
+200	"12153"	session_dead
+500	"Offline user session not found"	session_dead
+429	"{\"code\":6004,\"msg\":\"您的使用量已超出频率限制，将在 2026-09-15 13:25:47 UTC+8 重置，您也可以切换其他模型继续使用。\"}"	model_rate
+429	"超出频率限制"	model_rate
+429	"请切换其他模型"	model_rate
+200	"超出频率限制"	none
+400	"{\"code\":6004,\"msg\":\"x\"}"	client
+429	"{\"error\":{\"message\":\"rate limited\"}}"	soft_rate
+429	""	soft_rate
+400	"{\"code\":11115,\"msg\":\"prompt is too long: 1119655 tokens \u003e 1048576 maximum\",\"extError\":{\"code\":\"context_length_exceeded\",\"type\":\"invalid_request_error\"},\"displayMsg\":{\"en\":\"The request exceeds the model context limit...\",\"zh\":\"对话内容超出模型长度上限，请精简对话或减少附件后重试。\"}}"	context_too_long
+400	"{\"extError\":{\"code\":\"context_length_exceeded\"}}"	context_too_long
+400	"prompt is too long"	context_too_long
+400	"input length too long"	context_too_long
+400	"The request exceeds the model context limit"	context_too_long
+400	"对话内容超出模型长度上限，请精简对话或减少附件后重试。"	context_too_long
+413	"prompt is too long"	context_too_long
+429	"prompt is too long"	soft_rate
+400	"{\"code\":11115,\"msg\":\"input length too long\"}"	context_too_long
+429	"{\"error\":{\"data\":{\"code\":14018,\"msg\":\"Credits exhausted. Please visit the link below to purchase add-on packs and get more credits: …\"}}}"	hard_credit
+200	"{\"error\":{\"data\":{\"code\":14018,\"msg\":\"x\"}}}"	hard_credit
+500	"{\"error\":{\"data\":{\"code\":14018}}}"	hard_credit
+429	"{\"code\":6004,\"msg\":\"余额不足\"}"	hard_credit
+200	"some random error"	none
+400	"bad request"	client
+200	"{\"code\":0,\"msg\":\"ok\"}"	none

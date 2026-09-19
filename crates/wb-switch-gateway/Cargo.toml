@@ -20,6 +20,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5"
 thiserror = "2"
 base64 = "0.22"
+regex = "1"
+url = "2"
+bytes = "1"
+tokio-stream = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
