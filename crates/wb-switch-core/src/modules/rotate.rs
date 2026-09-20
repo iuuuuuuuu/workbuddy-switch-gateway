@@ -120,9 +120,12 @@ pub fn decide_target(
     if let Some(target_ts) = target.soonest_expire_at {
         let remaining_ms = target_ts - now_ms();
         if remaining_ms > min_urgency_ms {
+            // 向上取整：剩余 5 天差 1ms 时应显示「还剩 5 天」，直接整除会截断成 4 天，
+            // 读起来像快到期了。ceil 让档位不会因为多跑了几毫秒而往下掉。
+            let days = (remaining_ms + 24 * 3600_000 - 1) / (24 * 3600_000);
             return Decision::Skip(format!(
                 "所有账号到期都还早（最紧迫的还剩 {} 天），无需切换",
-                remaining_ms / (24 * 3600_000)
+                days
             ));
         }
     }
@@ -497,6 +500,34 @@ mod tests {
             dt(&candidates, Some("a")),
             Decision::Skip("所有账号到期都还早（最紧迫的还剩 5 天），无需切换".to_string())
         );
+    }
+
+    /// 天数必须向上取整，不能整除截断。
+    ///
+    /// 回归：`decide_target` 内部会重新取一次 `now_ms()`，所以候选的到期时间
+    /// 总是比「整 5 天」少几毫秒（构造 fixture 与调用之间流逝的时间）。旧的
+    /// `remaining_ms / 86400000` 会把它截断成 4 天 —— 本机跑得快只是侥幸过了，
+    /// macOS CI 上慢一点就断言失败（run 35517404516）。截断本身也是真实显示
+    /// bug：还剩 5 天的账号会提示「还剩 4 天」。
+    #[test]
+    fn remaining_days_round_up_not_truncate() {
+        const DAY: i64 = 24 * 3600_000;
+        // 覆盖「整 5 天」以及各种零头：差 1ms / 1s / 1h 都仍应显示 5 天。
+        for elapsed in [0, 1, 1_000, 60_000, 3600_000, DAY - 1] {
+            let now = now_ms();
+            // 先扣掉 elapsed，再往回补，保证即使 decide_target 里又流逝了几毫秒，
+            // 剩余量也恰好落在 (4 天, 5 天] 区间内。
+            let expire = now + 5 * DAY - elapsed;
+            let candidates = vec![cand("a", Some(expire), 100.0, true)];
+
+            match dt(&candidates, Some("a")) {
+                Decision::Skip(msg) => assert!(
+                    msg.contains("还剩 5 天"),
+                    "elapsed={elapsed}ms 时应显示 5 天，实际: {msg}"
+                ),
+                other => panic!("elapsed={elapsed}ms 时应 Skip（距到期还早），实际: {other:?}"),
+            }
+        }
     }
 
     #[test]
