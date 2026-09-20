@@ -63,6 +63,15 @@ pub struct Config {
     /// 会话粘性。
     #[serde(rename = "session_sticky")]
     pub session_sticky: SessionStickyConfig,
+    /// 出站 HTTP 代理，形如 `"http://127.0.0.1:7890"`（缺省空 = 不用显式代理）。
+    ///
+    /// 为什么需要：国际版（workbuddy.ai）在国内直连不稳定（实测 wsarecv 超时），
+    /// 走代理才稳。宿主会把「设置 → 更新代理」里已填的地址复用到此处，
+    /// 用户无需配两遍。
+    ///
+    /// 注意 Go 的 http.ProxyFromEnvironment **只读环境变量**、不读 Windows 注册表，
+    /// 所以「浏览器能走系统代理」不代表网关也能——必须显式配置。
+    pub proxy: String,
 
     /// normalize 后的解析值（不参与反序列化）。
     #[serde(skip)]
@@ -100,6 +109,7 @@ impl Default for Config {
             upstash: UpstashConfig::default(),
             pool: PoolConfig::default(),
             session_sticky: SessionStickyConfig::default(),
+            proxy: String::new(),
             parsed: ParsedConfig::default(),
         }
     }
@@ -233,6 +243,21 @@ pub struct PoolConfig {
     /// 积分到期巡检开关，缺省 true。
     #[serde(rename = "credit_refresh_enabled", default = "default_true")]
     pub credit_refresh_enabled: bool,
+    /// 是否启用「单一模型 + 积分轮转」模式（缺省 false = 负载均衡）。
+    ///
+    /// 语义差异：负载均衡在最早到期的那一档**内部分摊**（多号并行承接流量）；
+    /// 轮转则**串行烧号**——始终只用一个账号，把它烧到不可用才换下一个，
+    /// 换的仍是按到期日排序的下一个。见 pool 轮转选号 / `set_rotation`。
+    ///
+    /// 缺省 false 保证老配置行为不变；该字段由宿主写入网关配置。
+    pub rotation: bool,
+    /// 「单一模型」锁定（配合 rotation）：非空时只放行该模型。
+    ///
+    /// 轮转的语义是「把这个账号的指定模型额度烧干净再换号」，模型是策略的
+    /// 一部分，因此必须锁定——否则客户端换个模型就绕过了轮转与额度控制，
+    /// 也让「当前烧的是哪个模型」变得不可预期。空串 = 不限制（默认）。
+    #[serde(rename = "allowed_model")]
+    pub allowed_model: String,
 }
 
 impl Default for PoolConfig {
@@ -246,6 +271,8 @@ impl Default for PoolConfig {
             idle_weight_max: 5.0,
             credit_refresh_interval: "15m".into(),
             credit_refresh_enabled: true,
+            rotation: false,
+            allowed_model: String::new(),
         }
     }
 }
@@ -618,6 +645,18 @@ mod tests {
         assert!((c.pool.idle_weight_max - 5.0).abs() < f64::EPSILON);
         assert!(c.pool.credit_refresh_enabled);
         assert!(c.session_sticky.enabled);
+        assert!(!c.pool.rotation, "轮转缺省关闭");
+        assert_eq!(c.pool.allowed_model, "");
+        assert_eq!(c.proxy, "");
+    }
+
+    #[test]
+    fn rotation_and_allowed_model_and_proxy() {
+        let raw = br#"{"pool":{"rotation":true,"allowed_model":"glm-5.3"},"proxy":"http://127.0.0.1:7890"}"#;
+        let c = Config::from_json(raw).unwrap();
+        assert!(c.pool.rotation);
+        assert_eq!(c.pool.allowed_model, "glm-5.3");
+        assert_eq!(c.proxy, "http://127.0.0.1:7890");
     }
 
     #[test]

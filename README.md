@@ -13,6 +13,11 @@
 与 [workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的 OpenAI 兼容网关，
 整合进同一个桌面应用：**一个安装包、一个界面、一个进程树**。
 
+> **当前进度**：版本 `0.8.10`。**网关内核正在从 Go 迁到 Rust** —— Upstream 层
+> （请求构造 / 响应分类 / SSE 规范化 / 指纹脱敏 / 对话与旅行客户端）已用 Rust 重写完成，
+> 账号池与 HTTP 层也已落地，迁移期间**发行版仍内嵌 Go 网关**。
+> 详见 [网关内核迁移](#网关内核迁移rust-重写进行中)。
+
 [功能特性](#功能特性) · [架构](#架构设计) · [快速开始](#快速开始) · [使用指南](#使用指南) · [常见问题](#常见问题) · [上游与许可](#上游来源与许可证)
 
 </div>
@@ -39,6 +44,22 @@
 > 整合部分（网关页面、账号同步、单文件内嵌、单实例保护、按到期日分层选号及若干
 > 缺陷修复）由 [momo0410](https://github.com/momo0410) 完成。
 > 详见 [上游来源与许可证](#上游来源与许可证)。
+
+### 支持的客户端（仅 WorkBuddy）
+
+**本项目只支持腾讯 WorkBuddy / CodeBuddy 一家产品，且是这个项目的唯一适用范围。**
+
+- 账号来源、OAuth 登录、签到、猫猫旅行、积分与 Token 统计、模型清单等，全部按
+  WorkBuddy / CodeBuddy 的接口与凭证格式实现，**不认识任何其他厂商的账号体系**。
+- 网关只做协议转译（OpenAI / Anthropic ⇄ WorkBuddy 上游），**不包含任何第三方
+  AI 产品的适配代码**。
+- 「智能体管理」里的 11 类客户端（Claude Code、Codex、OpenCode 等）是**下游接入方**：
+  它们只是被写入一份「指向本网关」的配置，本项目不包含、也不依赖它们的源码。
+- 换用其他产品（无论是其他厂商的 AI 编程工具，还是其他账号池）**不在支持范围内**，
+  需要另行改造上游地址、鉴权与请求/响应结构，本项目不提供该适配，也不受理相关反馈。
+
+> 也就是说：**入口（下游客户端）可以是任意 OpenAI / Anthropic 兼容工具，
+> 出口（上游账号）只能是 WorkBuddy / CodeBuddy。**
 
 ---
 
@@ -76,6 +97,10 @@
 支持的客户端：Claude Code / Claude Desktop / Codex / DeepSeek Harness / OpenCode /
 Pi / Grok Build / ZCode / Kimi Code / OpenClaw / Hermes Agent。
 
+> 这里的「支持」指**可被本网关接入**，即把网关地址与 API Key 写进它们的配置。
+> 本项目**只支持 WorkBuddy / CodeBuddy 作为上游账号**，不含任何其他厂商的自有源码
+> 或账号适配，详见 [支持的客户端（仅 WorkBuddy）](#支持的客户端仅-workbuddy)。
+
 ### 兼容网关
 
 源自 [workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)。
@@ -83,15 +108,19 @@ Pi / Grok Build / ZCode / Kimi Code / OpenClaw / Hermes Agent。
 - **OpenAI 兼容接口**：`POST /v1/chat/completions`（流式 / 非流式）、`GET /v1/models`
 - **OpenAI Responses 接口**：`POST /v1/responses`（兼容 Codex CLI 0.146+）
 - **Anthropic Messages 接口**：`POST /v1/messages`（Claude Code / Claude Desktop 3P；请求与 SSE 双向转译、Tool Use 结构转换、Claude 槽位名自动翻译为上游模型名）
-- **账号池调度**：按积分到期日分层选号 —— 先烧快过期额度，同一天到期的账号平均分摊
-- **积分到期巡检**：每 15 分钟刷新余额与到期日，驱动上面的分层选号
+- **账号池调度**：三种模式 —— 负载均衡（按到期日分层）、积分轮转（单一模型串行烧号）、指定账号
+- **积分到期巡检**：每 15 分钟刷新余额与到期日，驱动分层选号
 - **熔断与冷却**：429/404 软冷却、余额不足硬冷却至次日 04:00、连续失败指数退避熔断、在途租约限流
 - **模型级限流隔离**：识别上游 `429 code=6004`，只冷却**单个模型**（按账号+模型记），
   冷却时长取报错里的重置时间，并在账号池里与「余额欠费」分开显示
+- **上下文超长不换号**：识别 `11115` / `context_length_exceeded`，直接返回 400 而不是
+  当成账号故障 —— 否则会对池里每个账号重传一遍同样的超长请求
+- **模型能力下发**：`/v1/models` 带出思考等级与图片能力，客户端据此决定能否发图 / 用什么思考档
 - **会话粘性**：同一会话尽量绑定同一账号，TTL 滚动续期，失败自动解绑
 - **定时任务**：每日 09:00 / 21:00 签到 + 余额查询解冻；22:00 全账号 Token 刷新保活
 - **猫猫旅行**：随签到时点自动巡检（详见下节）
 - **出站脱敏**：请求体黑名单指纹字段清洗（可关闭）
+- **出站代理**：支持显式配置 HTTP 代理并复用「更新代理」设置，国际版直连不稳时可走代理
 - **状态持久化**：池状态本地原子落盘，可选 Upstash Redis 镜像
 
 #### 按到期日分层选号
@@ -125,18 +154,25 @@ Pi / Grok Build / ZCode / Kimi Code / OpenClaw / Hermes Agent。
 > ② 网关自身的巡检。因此本应用导出凭证时会**原样透传 `credit` 块** —— 丢掉它会让
 > 每次账号同步都把依据抹掉一次，表现为「分层均衡时灵时不灵」。
 
-#### 网关工作模式
+#### 三种账号池调度模式
 
 可在「兼容网关」页面随时切换，**点击即时生效**（自动重导出凭证并按需重启网关），
-两种模式都完整保留熔断、冷却、会话粘性：
+三种模式都完整保留熔断、冷却与会话粘性：
 
 | 模式 | 行为 | 适用场景 |
 |---|---|---|
 | **负载均衡**（默认） | 先打最近到期的积分，同一天到期的账号平均分摊；自动跳过冷却 / 熔断中的账号 | 多账号均衡使用，避免积分过期作废 |
+| **积分轮转** | 始终只用**一个**账号，把它烧到不可用（余额耗尽 / 被限流 / 熔断）才换下一个；换的仍是按到期日排序的下一个。通常配合**单一模型锁定**使用 | 想让额度按到期日被逐个、彻底地烧掉 |
 | **指定账号** | 只使用你选定的那一个账号 | 固定身份、单独消耗某账号额度、排查单个账号问题 |
 
-> 实现方式：网关依据凭证目录建立账号池，指定账号模式只需**只导出该账号的凭证**。
-> 因此无需改动网关注册逻辑，也不会损失其任何治理能力。切换时旧凭证会被自动清理。
+> **积分轮转 vs 指定账号**：轮转**仍然导出全部账号** —— 「换下一个」需要备选账号
+> 都在池里，只导出一个是转不起来的；区别只在网关侧的选择策略（`pool.rotation`）。
+> 轮转建议同时锁定单一模型：模型是策略的一部分，否则客户端换个模型就绕过了额度
+> 控制，「当前烧的是哪个模型」也变得不可预期。
+>
+> 实现方式：网关依据凭证目录建立账号池，指定账号模式只需**只导出该账号的凭证**，
+> 负载均衡与轮转则导出全部账号。因此无需改动网关注册逻辑，也不会损失其任何治理能力。
+> 切换时旧凭证会被自动清理。
 >
 > 由于账号池是网关**启动时**扫描凭证目录建立的，模式切换必须重导出凭证并重启子进程
 > 才真正生效 —— 这一步已由核心层的 `switch_mode` 合并完成，用户点一下即可，无需手动重启。
@@ -220,7 +256,7 @@ refresh token 被服务端明确拒绝（如 `12153 Offline user session not fou
 | 能力 | 说明 |
 |---|---|
 | **账号自动同步** | 账号库变更后自动推送到网关凭证目录；网关运行中则自动重启加载。约 30 秒内生效 |
-| **模式切换即时生效** | 「负载均衡 ↔ 指定账号」点击即生效，无需手动重启网关 |
+| **模式切换即时生效** | 三种模式（负载均衡 / 积分轮转 / 指定账号）点击即生效，无需手动重启网关 |
 | **凭证元数据保活** | 同步时保留网关写入的 `credit` 块，避免分层选号依据被抹掉 |
 | **端口自由选择** | 界面内直接改端口，实时检测占用并给出建议，可一键切换空闲端口 |
 | **用量面板全量展示** | 「按账号/按模型」不再截断成前 5 条（此前 8 个账号都在正常轮转、界面只显示 5 个，会被误读成「负载均衡只用了 5 个账号」） |
@@ -232,6 +268,10 @@ refresh token 被服务端明确拒绝（如 `12153 Offline user session not fou
 | **智能体一键接入** | 11 类客户端自动写入网关配置（多协议 + 多模型），写入前自动备份、可回滚 |
 | **客户端按区重启** | 切换账号时按账号区域关闭/启动对应客户端（国服 WorkBuddy / 国际版 WorkBuddy AI 互不干扰） |
 | **官方用量按区取数** | 国际版账号的官方请求用量与积分查询走 workbuddy.ai 域名，不再误发国服域名被拒 |
+| **指定账号显示备注** | 「指定账号」下拉显示账号备注，不再只认昵称 —— 同名账号此前无法区分 |
+| **模型拉取不再误伤账号** | 拉模型列表失败不再计入熔断（国际版该接口本就不通，此前会把国际版账号集体燎断） |
+| **停止网关不再弹框** | 停止/退出网关改用作业对象与 `Child::kill` 双路径，修复 Windows 关机时 `taskkill` 弹框与 **非 Windows 平台永久阻塞** |
+| **网关支持出站代理** | 网关与宿主共用「更新代理」配置，修复 `no_proxy` 用法导致代理完全不生效 |
 
 关于**单实例保护**的必要性：应用启动后会运行 8 个后台任务（签到、保活、自动轮换、
 旅行派发/领取、网关同步等），它们都会写同一份账号库。若允许多开，多个实例会并发
@@ -340,10 +380,11 @@ refresh token 被服务端明确拒绝（如 `12153 Offline user session not fou
 ## 架构设计
 
 ```
-┌──────────────────── wb-switch.exe（单一可执行文件）────────────────────┐
+┌──────────────────── 单一可执行文件（wb-switch.exe / .app）──────────────┐
 │                                                                        │
 │  桌面壳（Tauri 2 / Rust）                                               │
-│  ├─ 主窗口：内嵌 React 前端（账号管理 · Token 统计 · 积分统计 · 兼容网关）│
+│  ├─ 主窗口：内嵌 React 前端（账号管理 · Token 统计 · 积分统计             │
+│  │                        · 兼容网关 · 智能体管理 · 设置）               │
 │  ├─ 系统托盘与单实例保护                                                │
 │  └─ 后台任务：签到 · 保活 · 自动轮换 · 旅行 · 账号同步                   │
 │                                                                        │
@@ -351,10 +392,14 @@ refresh token 被服务端明确拒绝（如 `12153 Offline user session not fou
 │  ├─ account / auth_file / switch / session …   账号与登录态             │
 │  ├─ checkin / refresh / rotate / travel …      定时任务                 │
 │  ├─ gateway.rs                                 网关托管与账号桥接        │
+│  ├─ agent_import.rs                            智能体一键接入            │
 │  └─ gateway_embed.rs                           内嵌网关的释放与缓存      │
 │                                                                        │
-│  内嵌网关二进制（Go，gzip 压缩，构建期写入）                              │
+│  内嵌网关二进制（Go，gzip 压缩，构建期写入）← 迁移期分发路径              │
 │  └─ 运行时释放为 ~/.wb-switch/gateway/bin/gateway-<指纹>.exe            │
+│                                                                        │
+│  wb-switch-gateway（Rust 库）← 迁移中的替代实现，当前独立二进制对照      │
+│  └─ upstream/ · pool · server · auth · config                           │
 └────────────────────────────────────────────────────────────────────────┘
             │                                        │
             ▼                                        ▼
@@ -372,6 +417,31 @@ refresh token 被服务端明确拒绝（如 `12153 Offline user session not fou
 - 账号库 → 网关：按 uid 生成嵌套形凭证；账号删除或模式切换后自动清理残留
 - 网关 → 账号库：网关自身刷新 Token 后，按过期时间较新者回写（空 refresh token 不覆盖已有值）
 - 内容无变化时不写盘，避免无意义的文件时间戳变动与网关重启
+
+---
+
+## 网关内核迁移（Rust 重写，进行中）
+
+原先网关是上游的 Go 程序（源码在 `go-gateway/`），编译后 gzip 内嵌进主程序。为了
+去掉「Go 工具链 + 预编译二进制」这条分发链，正在把网关内核**按模块逐一对齐**地用
+Rust 重写（`crates/wb-switch-gateway/`），迁移原则是：每个模块都保持与 Go 版
+**完全一致**的对外行为（HTTP 响应体、状态机语义、日志口径），并用同一套用例做
+A/B 对照。
+
+| 模块 | Go 源文件 | Rust 状态 |
+|---|---|---|
+| `upstream/` | `internal/upstream/*.go` | ✅ 已移植（headers / sanitize / payload / sse / client / travel） |
+| `pool` | `internal/pool/pool.go` | ✅ 已移植（选号、熔断、冷却、模型级隔离、状态持久化） |
+| `server` | `internal/server/handler.go` 等 | 🚧 路由 / 鉴权 / `/healthz` / `/status` / `/v1/models` 已落地；`/v1/chat/completions` 仍为占位 |
+| `session` / `scheduler` / `logging` / `config` / `auth` | 对应各文件 | 🚧 部分移植（文档见 crate 内 `lib.rs` 的模块对应表） |
+
+**当前分发路径不变**：发行版仍内嵌并运行 Go 网关，Rust 版以独立二进制
+（`wb-switch-gateway` 的 `wb2g-ref`，默认端口 7864）与 Go 版做同配置的 HTTP 行为
+对照。`upstream` 层的错误分类用 Go 探针（`go-gateway/cmd/probe-classify`）生成
+固定矩阵，再由 Rust 侧 `tests/ab_classify.rs` 固化比对，保证两边判定一致。
+
+> 迁移完成前，`go-gateway/` 是**实际构建依赖**，不能删除；对网关行为的改动需要
+> 同时体现在 Go 与 Rust 两侧。
 
 ---
 
@@ -403,10 +473,10 @@ refresh token 被服务端明确拒绝（如 `12153 Offline user session not fou
 
 ### 安装方式二：便携版（Windows，免安装）
 
-下载 `WorkBuddy_Switch_Gateway_<版本>_portable.zip`，解压后双击 `wb-switch-rust.exe`
-即可运行，不写入注册表。
+下载 `WorkBuddy_Switch_Gateway_<版本>_portable.zip`，解压后双击其中的主程序
+（`wb-switch-rust.exe`）即可运行，不写入注册表，附有「使用说明.txt」。
 
-> `WebView2Loader.dll` 必须与 `wb-switch-rust.exe` 位于同一目录，请勿删除。
+> `WebView2Loader.dll` 必须与主程序位于同一目录，请勿删除。
 
 ### 更新到新版本
 
@@ -422,9 +492,12 @@ refresh token 被服务端明确拒绝（如 `12153 Offline user session not fou
 
 ### 安装方式三：从源码构建
 
-需要 Go ≥ 1.22、Node.js ≥ 20、Rust 工具链（Windows 需 MSVC 工具链以链接 WebView2）。
+需要 Go ≥ 1.22（迁移完成前需要，用于构建内嵌网关）、Node.js ≥ 20、
+Rust 工具链（Windows 需 MSVC 工具链以链接 WebView2）。
 
 > 网关源码随仓库分发在 `go-gateway/`，无需另行 clone 上游、也不需要打补丁。
+> Rust 版网关内核在 `crates/wb-switch-gateway/`，与桌面端同属一个 workspace，
+> 无需单独构建。
 
 ```bash
 # 1) 构建网关（Go）—— 产物落到 crates/wb-switch-core/embedded/，
@@ -435,6 +508,7 @@ GOOS=darwin  GOARCH=arm64 sh scripts/build-gateway.sh
 
 # 2) 前端 + 桌面应用
 npm ci
+npm run build                                            # 必须先跑：产出 dist/ 供 rust-embed 内嵌
 npm run tauri -- build --bundles app                     # macOS（产出 .app）
 npm run tauri -- build --bundles nsis,msi                # Windows
 
@@ -442,6 +516,9 @@ npm run tauri -- build --bundles nsis,msi                # Windows
 sh scripts/make-dmg.sh <版本> <aarch64|x86_64> \
   "target/release/bundle/macos/WorkBuddy Switch Gateway.app"
 ```
+
+> 带 updater 签名的发行构建请用 `pwsh scripts/build-signed.ps1`
+> （仅校验密钥不构建：加 `-CheckOnly`），密钥与口令都在仓库外。
 
 > macOS 产物为 adhoc 签名（无 Apple 开发者证书），首次打开若提示「已损坏」，执行
 > `xattr -cr "/Applications/WorkBuddy Switch Gateway.app"` 放行。
@@ -455,15 +532,38 @@ npm run build            # 前端类型检查与构建
 npm run tauri build      # 构建当前平台安装包
 ```
 
+> **改前端后必须先 `npm run build`**：`wb-switch-server` 用 `rust-embed` 在**编译期**
+> 把 `dist/` 嵌进二进制，`dist/` 不存在时该 crate 直接编译失败（连带 `cargo test
+> --workspace` 一起停）。调试网关内核（Rust 版）时可单独跑参考实例：
+
+```bash
+# Rust 网关内核：最小可运行实例，与 Go 版做同配置 A/B 对照
+cargo run -p wb-switch-gateway --bin wb2g-ref -- 7864
+```
+
 ### 发布新版本
 
-推一个 `v*` tag 即可，`.github/workflows/release.yml` 会构建 Windows x64 / macOS arm64 /
-Linux x64 三个平台并建 Release。日常 push 走 `.github/workflows/ci.yml`，三平台编译校验 + 单测 + Go 网关单测，不产出安装包。
+推一个 `v*` tag 即可，`.github/workflows/release.yml` 会构建四个目标 ——
+Windows x64、macOS arm64、macOS x64、Linux x64 —— 并建 Release
+（同时产出安装包与自动更新用的 `.sig` 签名清单）。
+
+日常 push 走 `.github/workflows/ci.yml`，两个 job：
+
+- **check**（三平台矩阵）：`npm run build` 前端类型检查 → `cargo test -p wb-switch-core`
+  核心单测 → `cargo check --workspace --all-targets` 全量编译校验（`--all-targets`
+  会连测试代码一起编，平台门控写错会在这里红）
+- **gateway**：`go-gateway/` 的 Go 单测 + 交叉构建链路验证
+
+两个 job 都不产出安装包。
 
 **npm 版（webui）发布**：
 
-1. CI 在 tag 发布时编译 server 二进制，作为平台包 `workbuddy-switch-win32-x64` 发布到 npm registry
-2. `cd npm && npm publish`（包名 `workbuddy-switch`，postinstall 从平台包复制二进制到 `bin/`，不依赖 GitHub）
+1. CI 在 tag 发布时编译 server 二进制，作为**平台包**发布到 npm registry
+   （`workbuddy-switch-{win32-x64,darwin-arm64,darwin-x64,linux-x64,linux-arm64}`）
+2. `cd npm && npm publish`（包名 `workbuddy-switch`，平台包走 `optionalDependencies`，
+   postinstall 从平台包复制二进制到 `bin/`，不依赖 GitHub）
+
+安装后即可运行 `workbuddy-switch` 启动本地 webui。
 
 ### 目录结构
 
@@ -472,9 +572,11 @@ src-tauri/src/       # Tauri command 薄包装与托盘
 crates/
   wb-switch-core/    # 核心逻辑：账号/认证/切换/会话/签到/刷新/更新/配置/智能体接入
   wb-switch-server/  # HTTP server + CLI：axum API + rust-embed 前端
-  wb-switch-gateway/ # 网关内核（Rust 移植版，chat_completions 仍为占位）
-src/                 # 前端：components/pages/lib（api.ts 双通道：Tauri invoke / HTTP fetch）
-go-gateway/          # Go 版网关源码（当前实际构建依赖，编译后内嵌）
+  wb-switch-gateway/ # 网关内核（Rust 重写版，迁移中；chat_completions 仍为占位）
+src/                 # 前端：pages/ + components/（api.ts 双通道：Tauri invoke / HTTP fetch）
+  src/pages/         # AccountsPage · TokenStatsPage · CreditStatsPage · GatewayPage
+                     # AgentsPage · SettingsPage
+go-gateway/          # Go 版网关源码（迁移期间的实际构建依赖，编译后内嵌）
 npm/                 # npm 包：package.json + bin + scripts/install.js
 scripts/             # 构建与发布脚本
 ```
@@ -521,7 +623,9 @@ scripts/             # 构建与发布脚本
 2. 设置**服务端口**（默认 `7863`）— 输入框右侧会实时显示端口是否可用
    - 若显示「已被占用」，点击「自动」自动挑选空闲端口，或点建议端口一键切换
 3. 设置 **API Key**（留空表示不鉴权；公网部署务必设置）
-4. 选择**工作模式**：负载均衡 / 指定账号（后者需选择具体账号，**点击即时生效**）
+4. 选择**工作模式**：负载均衡 / 积分轮转 / 指定账号（**点击即时生效**）
+   - 选「积分轮转」时建议在「单一模型」下拉里锁定一个模型
+   - 选「指定账号」时需先选择一个账号（下拉显示账号备注，便于区分同名账号）
 5. 点击「启动网关」
 
 账号池区域会显示每个账号的到期档位：`到期 MM-DD` 是分层依据（同一天的账号同级
@@ -566,11 +670,12 @@ export ANTHROPIC_AUTH_TOKEN=<你设置的 api_key>
 |---|---|---|
 | `port` | `7863` | 服务端口（权威字段，`listen` 由它派生） |
 | `api_key` | 空 | 接口鉴权密钥；空 = 不鉴权 |
-| `mode` | `balance` | 工作模式：`balance` 负载均衡 / `pinned` 指定账号 |
-| `pinned_uid` | `null` | 指定账号模式锁定的账号 uid |
+| `mode` | `balance` | 工作模式：`balance` 负载均衡 / `rotation` 积分轮转 / `pinned` 指定账号 |
+| `pinned_uid` | `null` | 指定账号模式锁定的账号 uid（切到轮转/负载均衡时自动清空） |
 | `auto_start` | `false` | 随应用启动自动拉起网关 |
 | `checkin_enabled` | `true` | 是否启用签到排程（猫猫旅行随之启停） |
 | `keepalive_enabled` | `true` | 是否启用 Token 保活排程 |
+| `proxy` | 空 | 出站 HTTP 代理，形如 `http://127.0.0.1:7890`；复用「更新代理」设置 |
 
 转换成网关格式后写入 `gateway_native_config.json`，其中这些项需手动编辑：
 
@@ -583,8 +688,13 @@ export ANTHROPIC_AUTH_TOKEN=<你设置的 api_key>
 | `pool.idle_weight_max` | `5.0` | 闲置补偿封顶 |
 | `pool.max_in_flight` | `3` | 单账号在途租约上限 |
 | `pool.breaker_threshold` | `3` | 连续失败几次触发熔断 |
+| `pool.rotation` | `false` | 单一模型 + 积分轮转选号策略（由「工作模式」写入，缺省 false 保证老配置行为不变） |
+| `pool.allowed_model` | 空 | 轮转模式锁定的模型名；非空时网关只放行该模型（空 = 不限制） |
 
 > 关闭积分巡检后，分层选号将只依赖签到与本应用同步的数据，到期档位更新会明显滞后。
+> `proxy` 为空的含义是**不用显式代理** —— 注意 Go 的 `http.ProxyFromEnvironment`
+> 只读环境变量、不读 Windows 注册表，所以「浏览器能走系统代理」不代表网关也能，
+> 需要显式填写。
 
 ### 托盘与单实例
 
@@ -600,8 +710,9 @@ export ANTHROPIC_AUTH_TOKEN=<你设置的 api_key>
 |---|---|---|
 | 账号库 | `~/.wb-switch/accounts.json` | **唯一真源**，含所有账号凭证，建议单独备份 |
 | 网关凭证 | `~/.wb-switch/gateway/gateway_auths/` | 由账号库派生，删除后可自动重建 |
-| 网关配置 | `~/.wb-switch/gateway/gateway_config.json` | 端口、API Key、模式等 |
-| 网关原生配置 | `~/.wb-switch/gateway/gateway_native_config.json` | 转换后交给网关进程的配置 |
+| 网关配置 | `~/.wb-switch/gateway/gateway_config.json` | 端口、API Key、模式、代理等 |
+| 网关原生配置 | `~/.wb-switch/gateway/gateway_native_config.json` | 转换后交给网关进程的配置（含 `pool.rotation`） |
+| 网关池状态 | `~/.wb-switch/gateway/gateway_data/state.json` | 账号余额、到期档位、冷却与模型级冷却，重启后恢复 |
 | 内嵌网关副本 | `~/.wb-switch/gateway/bin/` | 按内容指纹命名，版本升级后自动更新 |
 | 智能体配置备份 | `~/.wb-switch/agent-backups/` | 一键接入前自动备份，可随时回滚 |
 | 签到 / 轮换日志 | `~/.wb-switch/*_logs.json` | 最多保留 30 天 |
@@ -653,6 +764,33 @@ export ANTHROPIC_AUTH_TOKEN=<你设置的 api_key>
 > 并重启子进程才真正生效 —— 这一步已由 `switch_mode` 自动完成（保存配置 →
 > 重导出 → 按需重启）。若网关当时没在运行，则只做前两步，下次启动自然是新池。
 
+**Q：负载均衡和积分轮转该选哪个？**
+> 看目标。**负载均衡**把最早到期那一档的账号**并行**铺开分摊流量，适合日常使用
+> （吞吐高、单号压力小）。**积分轮转**则是**串行**：始终只用一个账号，把它烧到
+> 不可用（余额耗尽 / 被限流 / 熔断）才换下一个，适合「想让额度按到期日被逐个彻底
+> 烧掉」的场景 —— 代价是同时只有一个账号在承接流量。轮转请配合「单一模型」锁定，
+> 否则客户端换个模型就绕过了额度控制。
+
+**Q：请求报「上下文超长」，为什么网关不换个账号重试？**
+> 因为那不是账号的问题。上游 `11115` / `context_length_exceeded` 属于请求本身的
+> 超限，换号重试只会把同一份超长请求在池里每个账号上重传一遍，既没用又浪费额度。
+> 网关会直接返回 400 并说明原因。早期版本把它当账号故障处理，会对整池账号各试一次。
+
+**Q：网关报「请求体过大」（413）？**
+> 单请求上限 32MB。此前上限是 8MB 且用 `io.LimitReader` 读满即返回，截断后的字节
+> 不是合法 JSON，解析失败后仍原样透传给上游，最终表现为 `11101 ... unexpected EOF`
+> —— 客户端只看到「请求参数有误」，无法定位到是网关截断。现在超限会明确返回 413，
+> 错误码按协议区分（OpenAI `payload_too_large` / Anthropic `request_too_large`）。
+> 长对话（尤其是带大量附件的）容易突破 8MB，这也是上限提高的原因。
+
+**Q：Claude 的槽位名（`claude-sonnet-5` 等）能直接用吗？**
+> 能。Anthropic 入口会把客户端传入的 Claude 槽位名自动翻译为上游的实际模型名，
+> 所以 Claude Code / Claude Desktop 里选 Claude 模型也能正常走本网关。
+
+**Q：国际版账号会被误判成故障吗？**
+> 不会。国际版的模型列表接口返回 500，拉取失败**不计入熔断** —— 早期版本会把这
+> 一次失败算作账号故障，导致国际版账号被集体燎断。现在只记录瞬时错误，账号照常可用。
+
 **Q：账号卡片显示「需重新登录」，但网关还在用这个账号？**
 > 已修复。refresh token 被服务端拒绝后，账号会被标记「需重新登录」，并**不再写入
 > 网关凭证目录** —— 网关池里不会再有它，也就不会每次请求都拿失效凭证去试一轮。
@@ -691,14 +829,32 @@ export ANTHROPIC_AUTH_TOKEN=<你设置的 api_key>
 crates/wb-switch-core/        核心逻辑（不依赖 Tauri，可被桌面端与 HTTP 服务复用）
   src/modules/account.rs        账号存储
   src/modules/auth_file.rs      认证文件读写 + 本机历史登录态扫描（本项目扩展）
+  src/modules/oauth.rs          OAuth 登录（含国际版三方授权）
   src/modules/refresh.rs        Token 刷新与保活（含传输层失败与凭证失效的区分）
+  src/modules/checkin.rs        自动签到
+  src/modules/rotate.rs         自动轮换
+  src/modules/session.rs        会话复制
+  src/modules/credits.rs        积分监控与到期
+  src/modules/token_stats.rs    Token 统计聚合
+  src/modules/official_usage.rs / credit_usage.rs   官方用量与积分统计
+  src/modules/codebuddy_cli.rs / codebuddy_cn_ide.rs / vscode_cn_inject.rs
+                                三套登录态切换（CLI / CN IDE / VS Code）
   src/modules/agent_import.rs   智能体一键接入与配置生成（本项目新增）
   src/modules/gateway.rs        网关托管与账号桥接（本项目新增）
   src/modules/gateway_embed.rs  内嵌网关的释放与缓存（本项目新增）
   src/modules/travel.rs         猫猫旅行（App 侧）
+  src/modules/export_import.rs  账号导出与导入
+  src/modules/update.rs         应用内更新
   src/modules/yaml_lite.rs      轻量 YAML 读写（本项目新增）
   build.rs                      构建期压缩内嵌网关（本项目新增）
+crates/wb-switch-gateway/     网关内核（Rust 重写版，迁移中）
+  src/upstream/                 headers / sanitize / payload / sse / client / travel
+  src/pool.rs src/server.rs src/auth.rs src/config.rs
+  src/bin/wb2g-ref.rs           与 Go 版做 A/B 对照的参考实例
+  src/bin/probe_state.rs        池状态探针
+  tests/ab_classify.rs + ab_classify_matrix.tsv   错误分类 A/B 固定矩阵
 crates/wb-switch-server/      HTTP 服务形态（npm / webui）
+  src/api.rs                    axum 路由（含 /api/token-stats 等）
 src/                          React 前端
   src/pages/GatewayPage.tsx     兼容网关页面（本项目新增）
   src/pages/AgentsPage.tsx      智能体管理页面（本项目新增）
@@ -707,27 +863,34 @@ src-tauri/                    桌面壳（Tauri 2）
   src/tray.rs                   托盘与单实例行为
   src/commands.rs               前端可调用的命令
 scripts/build-single.ps1      构建单一可执行文件（本项目新增）
+scripts/build-signed.ps1      带 updater 签名的发行构建（本项目新增）
 ```
 
 ### 测试
 
 ```bash
-cargo test --workspace          # 核心逻辑 + 桌面端单元测试
+cargo test --workspace          # 核心逻辑 + 网关内核 + 桌面端单元测试
 npm run build                   # 前端类型检查与构建
 ```
 
-> Windows x64 上实测 `cargo test --workspace` 全部通过（229 个核心用例 + 55 个网关用例）。
+> 需要先跑一次 `npm run build`（或手工建出 `dist/`）—— `wb-switch-server` 用
+> `rust-embed` 内嵌前端产物，`dist/` 不存在时该 crate 编译不过，整个 workspace 的
+> 测试也会被它带停。
+>
+> Windows x64 上实测 `cargo test --workspace` 全部通过
+> （**258** 个 core 用例 + **67** 个网关内核用例 + 2 个 Go/Rust 分类 A/B 对照用例）。
 > 构建需要 **MSVC 工具链**（`stable-x86_64-pc-windows-msvc`，Tauri 依赖它链接
 > WebView2）；若需安装，可用
 > `winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"`。
 
-网关侧（Go）自带完整测试套件；应用补丁后：
+网关侧（Go）自带完整测试套件：
 
 ```bash
-cd path/to/workbuddy2api && go test ./...
+cd go-gateway && go test ./...
 ```
 
 > 网关侧测试已在 Windows x64 上实测，`go test ./...` 当前全部通过。
+> 迁移完成后该套件将逐步让位给 `crates/wb-switch-gateway` 的 Rust 测试。
 
 ---
 
@@ -735,6 +898,10 @@ cd path/to/workbuddy2api && go test ./...
 
 本项目对 `workbuddy2api`（Go 网关）的改动**已直接合入 `go-gateway/`**，
 随仓库一并分发（源码基线为上游 `cfb1713`，叠加下列改动）。
+
+> **两套实现同时存在**：下面这些改动已同步重写在 `crates/wb-switch-gateway/` 的
+> Rust 版里（迁移进行中，见 [网关内核迁移](#网关内核迁移rust-重写进行中)）。
+> 迁移期间改动网关行为时，**Go 与 Rust 两侧都要改**。
 
 改动内容：
 
@@ -807,6 +974,34 @@ cd path/to/workbuddy2api && go test ./...
 
 > 若你只使用国服，可跳过该补丁，功能与上游一致。
 
+**积分轮转模式**（`internal/pool/pool.go`、`internal/server/`）
+
+- 新增串行烧号策略：`pool.rotation` 为真时，始终只用一个账号（按到期日排序取
+  下一个），把它烧到不可用（余额耗尽 / 被限流 / 熔断）才换号，与负载均衡的
+  「一档内并行分摊」语义相反
+- 新增 `pool.allowed_model`：轮转模式下锁定单一模型；非空时只放行该模型，
+  避免客户端换个模型就绕过额度控制
+- 路由的普通选号、粘性命中、全冷却兜底三个入口都遵守该策略
+
+**模型能力下发**（`internal/server/handler.go`、`internal/upstream/client.go`）
+
+- `/v1/models` 返回模型思考等级与图片能力（`supportsImages` 等），修复多模态
+  发不出图片的问题
+- 思考等级取自客户端配置并**缓存**；原先解析出的默认档被丢弃，现已接上
+
+**模型清单改用 `/v3/config`**（`internal/server/handler.go`）
+
+- 原先用 `/v3/utilities/models`，国际版拿不到模型且静态表过时
+- 现在以 `/v3/config` 为主，按 CLI 白名单过滤，并**不下发上游已停用的模型**
+- 拉取失败**不计入熔断** —— 国际版该接口本就不通，此前会把国际版账号集体燎断
+  （Issue #15）
+
+**上下文超长不换号**（`internal/upstream/client.go`、`internal/server/`）
+
+- 新增 `ErrContextTooLong` 分类：识别业务码 `11115`、`extError.code =
+  context_length_exceeded` 与中英文文案
+- 命中即返回 400 给客户端，**不再**当成账号故障轮流换号重传
+
 **请求体超限显式报错**（`internal/server/handler.go` 等三处协议入口）
 
 修复长对话报 `unexpected EOF` 的问题（Issue #5 后续）：
@@ -874,6 +1069,9 @@ Copyright (c) 2026 momo0410          （本项目整合部分）
 ## 免责声明
 
 - 本项目为**非官方**工具，与腾讯公司及 CodeBuddy / WorkBuddy 官方无任何关联。
+- 本项目**只支持 WorkBuddy / CodeBuddy** 一家产品，不包含其他任何厂商 AI 产品的
+  源码或账号适配；其他产品不在支持范围内（见
+  [支持的客户端（仅 WorkBuddy）](#支持的客户端仅-workbuddy)）。
 - 项目通过 OAuth 设备授权使用**用户本人**的账号凭证，不提供、不托管任何账号。
 - 使用本项目需遵守 CodeBuddy / WorkBuddy 的服务条款。因使用本项目产生的
   账号封禁、条款违约等风险由使用者自行承担。
