@@ -215,3 +215,38 @@ func TestCountersValueCacheHitRate(t *testing.T) {
 		t.Fatalf("cacheHitRate 应序列化为 null，实际 %v", decoded["cacheHitRate"])
 	}
 }
+
+func TestRecordRequestAndSnapshot(t *testing.T) {
+	s := New("")
+	now := time.Date(2026, 9, 29, 12, 0, 0, 0, time.Local)
+	s.now = func() time.Time { return now }
+
+	s.RecordRequest(RequestRecord{
+		Seq: 1, Ts: now.Add(-48 * time.Hour).UnixMilli(), Model: "glm-5.1", UID: "uid1", Status: 200,
+	})
+	s.RecordRequest(RequestRecord{
+		Seq: 2, Ts: now.Add(-1 * time.Hour).UnixMilli(), Model: "deepseek-v4", UID: "uid2", Status: 200,
+	})
+	s.RecordRequest(RequestRecord{
+		Seq: 3, Ts: now.UnixMilli(), Model: "deepseek-v4", UID: "uid2", Status: 503,
+	})
+
+	snapAll := s.RequestsSnapshot(0, 10)
+	if snapAll.Total != 3 || snapAll.Returned != 3 {
+		t.Fatalf("全部查询期望 3 条，实际 total=%d returned=%d", snapAll.Total, snapAll.Returned)
+	}
+	if snapAll.Requests[0].Seq != 3 || snapAll.Requests[1].Seq != 2 || snapAll.Requests[2].Seq != 1 {
+		t.Fatalf("排序应倒序（最新在前），实际顺序: %d, %d, %d", snapAll.Requests[0].Seq, snapAll.Requests[1].Seq, snapAll.Requests[2].Seq)
+	}
+
+	snapToday := s.RequestsSnapshot(1, 10)
+	if snapToday.Total != 2 || snapToday.Returned != 2 {
+		t.Fatalf("今日查询期望 2 条，实际 total=%d returned=%d", snapToday.Total, snapToday.Returned)
+	}
+
+	snapLimit := s.RequestsSnapshot(0, 1)
+	if snapLimit.Total != 3 || snapLimit.Returned != 1 {
+		t.Fatalf("limit 截断期望 total=3 returned=1，实际 total=%d returned=%d", snapLimit.Total, snapLimit.Returned)
+	}
+}
+

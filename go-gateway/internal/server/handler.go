@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -76,6 +77,7 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /usage", h.withAuth(h.usageReport))
+	h.mux.HandleFunc("GET /usage/requests", h.withAuth(h.usageRequestsReport))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	return h
 }
@@ -173,13 +175,82 @@ func (h *Handler) usageReport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, snapshot)
 }
 
-// recordUsage 把一次请求采集到的完整用量写入统计；无计量或未装配统计时跳过。
-// 只统计成功请求（上游返回了可用 usage 的请求），失败请求不计入。
-func (h *Handler) recordUsage(s *chatStat) {
-	if h.cfg.Usage == nil || !s.hasCounters {
+// usageRequestsReport 返回逐条请求明细（GET /usage/requests?days=N&limit=N）。
+func (h *Handler) usageRequestsReport(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.Usage == nil {
+		writeJSON(w, http.StatusOK, usage.RequestsSnapshot{
+			Enabled:     false,
+			GeneratedAt: time.Now().UnixMilli(),
+		})
 		return
 	}
-	h.cfg.Usage.Record(s.uid, s.model, s.counters)
+	days := 0
+	if raw := r.URL.Query().Get("days"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			days = n
+		}
+	}
+	limit := 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	snapshot := h.cfg.Usage.RequestsSnapshot(days, limit)
+	writeJSON(w, http.StatusOK, snapshot)
+}
+
+// recordUsage 把一次请求采集到的完整用量写入统计并记录逐条明细。
+func (h *Handler) recordUsage(s *chatStat) {
+	if h.cfg.Usage == nil {
+		return
+	}
+	if s.hasCounters {
+		h.cfg.Usage.Record(s.uid, s.model, s.counters)
+	}
+
+	totalMs := time.Since(s.start).Milliseconds()
+	ttfbMs := s.ttfb.Milliseconds()
+	var tps float64
+	if totalMs > 0 && s.counters.Output > 0 {
+		tps = math.Round(float64(s.counters.Output)/(float64(totalMs)/1000.0)*10) / 10
+	}
+	var hitRate *float64
+	if s.counters.Input > 0 {
+		r := float64(s.counters.CacheRead) / float64(s.counters.Input)
+		hitRate = &r
+	}
+	region := ""
+	if h.cfg.Pool != nil && s.uid != "" {
+		if a := h.cfg.Pool.AuthByUID(s.uid); a != nil {
+			if upstream.IsIntl(a) {
+				region = "intl"
+			} else {
+				region = "cn"
+			}
+		}
+	}
+	tot := s.counters.Input + s.counters.Output + s.counters.CacheWrite
+
+	h.cfg.Usage.RecordRequest(usage.RequestRecord{
+		Seq:          s.seq,
+		Ts:           time.Now().UnixMilli(),
+		Model:        s.model,
+		UID:          s.uid,
+		Entry:        s.entry,
+		Stream:       s.stream,
+		Region:       region,
+		Status:       s.status,
+		Input:        s.counters.Input,
+		Output:       s.counters.Output,
+		CacheRead:    s.counters.CacheRead,
+		CacheWrite:   s.counters.CacheWrite,
+		Total:        tot,
+		CacheHitRate: hitRate,
+		TtfbMs:       ttfbMs,
+		TotalMs:      totalMs,
+		Tps:          tps,
+	})
 }
 
 // withImageCapability 给静态表条目补上能力字段。
@@ -696,8 +767,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 //   - 单一模型模式拒绝 → model_not_allowed（见 modelLockedError）
 //   - 上下文超长       → context_length_exceeded
 func openAIFailure(err error) (code, msg string) {
-	if f := failureOf(err); f != nil && f.Kind == FailureContextTooLong {
-		return "context_length_exceeded", f.Message
+	if f := failureOf(err); f != nil {
+		switch f.Kind {
+		case FailureContextTooLong:
+			return "context_length_exceeded", f.Message
+		case FailureContentSafety:
+			return "content_filter", f.Message
+		}
 	}
 	// 其余交给 errorCodeFor（当前只有 model_not_allowed 与 no_healthy_account），
 	// 即 chat/completions 一直以来的行为。
@@ -709,8 +785,11 @@ func openAIFailure(err error) (code, msg string) {
 // 上下文超长在 Anthropic 语义里是 invalid_request_error（其真实文案即
 // "prompt is too long: ..."），而非 request_too_large（那是请求**字节数**超限）。
 func anthropicFailure(err error) (code, msg string) {
-	if f := failureOf(err); f != nil && f.Kind == FailureContextTooLong {
-		return "invalid_request_error", f.Message
+	if f := failureOf(err); f != nil {
+		switch f.Kind {
+		case FailureContextTooLong, FailureContentSafety:
+			return "invalid_request_error", f.Message
+		}
 	}
 	if errorCodeFor(err) != "no_healthy_account" {
 		return "invalid_request_error", errText(err)
@@ -727,8 +806,13 @@ func anthropicFailure(err error) (code, msg string) {
 // invalid_request_error。三个入口共享的是「谁来判定失败类别」这条映射链，
 // 不是同一个码面值；把码面值也一起统一会让各协议的词汇表互相串味。
 func responsesFailure(err error) (code, msg string) {
-	if f := failureOf(err); f != nil && f.Kind == FailureContextTooLong {
-		return "context_length_exceeded", f.Message
+	if f := failureOf(err); f != nil {
+		switch f.Kind {
+		case FailureContextTooLong:
+			return "context_length_exceeded", f.Message
+		case FailureContentSafety:
+			return "content_filter", f.Message
+		}
 	}
 	if errorCodeFor(err) != "no_healthy_account" {
 		return "invalid_request_error", errText(err)

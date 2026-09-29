@@ -475,9 +475,11 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 	var req anthropicRequest
 	_ = json.Unmarshal(body, &req)
 
-	stat := newChatStat(nowFunc(), body, true)
+	stat := newChatStat(nowFunc(), body, req.Stream)
 	stat.model = req.Model
 	stat.mode = "messages"
+	stat.entry = "messages"
+	stat.stream = req.Stream
 	defer func() {
 		stat.done()
 		h.recordUsage(stat)

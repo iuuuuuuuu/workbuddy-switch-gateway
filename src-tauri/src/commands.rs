@@ -34,14 +34,12 @@ pub async fn get_status() -> Result<AppStatus, String> {
 
 /// 把鉴权文件解析出的 account 规整成「当前账号」展示对象。
 ///
-/// 所有字段强制为字符串或 null（见 `account::display_string`），阻断加密信封
-/// 对象 `{ $wbEncrypted, envelope }` 透传到前端触发 React #31。见 issue #38。
+/// 统一走 core 的 `current_account_view`：所有字段强制为字符串或 null，
+/// 阻断加密信封对象 `{ $wbEncrypted, envelope }` 透传到前端触发 React #31。
+/// 见 issue #38 / #40。此前 Tauri 通道修好了，webui 的 `/api/status` 却漏了，
+/// 同一个错误在 webui 模式复现 —— 三条出码通道必须共用一份规整逻辑。
 fn build_current_account(acct: &Value) -> Value {
-    json!({
-        "uid": account::display_string(acct.get("uid")),
-        "nickname": account::display_string(acct.get("nickname")),
-        "email": account::display_string(acct.get("email")),
-    })
+    account::current_account_view(acct)
 }
 
 fn build_app_status() -> AppStatus {
@@ -901,6 +899,12 @@ pub async fn get_gateway_models() -> Result<Value, String> {
 #[tauri::command]
 pub async fn get_gateway_usage(days: Option<i64>) -> Result<Value, String> {
     Ok(wb_switch_core::modules::gateway::fetch_usage(days).await)
+}
+
+/// 获取网关逐条请求明细（days 省略 = 全部历史；limit 省略 = 网关默认上限）。
+#[tauri::command]
+pub async fn get_gateway_usage_requests(days: Option<i64>, limit: Option<i64>) -> Result<Value, String> {
+    Ok(wb_switch_core::modules::gateway::fetch_usage_requests(days, limit).await)
 }
 
 /// 读取网关日志末尾若干行（内置面板用）。

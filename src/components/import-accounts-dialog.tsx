@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dialog";
 import * as api from "@/lib/api";
 import type { ImportPreviewAccount } from "@/lib/types";
+import { displayText } from "@/lib/utils";
 
 interface Props {
   open: boolean;
@@ -24,7 +25,7 @@ interface Props {
 
 /** 导入预览账号展示名（脱敏展示：昵称/邮箱/uid）。 */
 function previewLabel(a: ImportPreviewAccount): string {
-  return a.nickname || a.email || a.uid || `第 ${a.index + 1} 项`;
+  return displayText(a.nickname) ?? displayText(a.email) ?? displayText(a.uid) ?? `第 ${a.index + 1} 项`;
 }
 
 /** 导入账号弹框：选 JSON 文件 → 后端解析预览 → 勾选账号 → 导入合并。 */

@@ -759,6 +759,66 @@ export interface GatewayUsageSnapshot {
   dailyByModel?: Record<string, GatewayUsageGroup[]>;
 }
 
+/** 网关请求明细中的单条请求（GET /api/gateway/usage/requests）。 */
+export interface GatewayRequestRecord {
+  /** 网关侧单调递增序号：同一秒内的请求也能稳定排序，前端直接用它当列表 key。 */
+  seq: number;
+  /** 请求结束时间（Unix 毫秒）。 */
+  ts: number;
+  model: string;
+  /** 发起请求的账号 uid；映射不到昵称时界面回退展示前 8 位。 */
+  uid: string;
+  /** 请求入口：chat / messages / responses。 */
+  entry: string;
+  /** 是否流式请求。 */
+  stream: boolean;
+  /** 上游区域："cn" | "intl" | ""（未知）。 */
+  region: string;
+  /** HTTP 状态码，2xx 视为成功。 */
+  status: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  /** input + output + cacheWrite（不含 cacheRead，避免重复计数）。 */
+  total: number;
+  /** 缓存命中率 = cacheRead / input；无输入时为 null。 */
+  cacheHitRate: number | null;
+  /** 首字延迟毫秒；0 = 非流式或未记录。 */
+  ttfbMs: number;
+  /** 总耗时毫秒。 */
+  totalMs: number;
+  /** 生成速度（tokens/s）。 */
+  tps: number;
+}
+
+/**
+ * 网关 /usage/requests 响应。
+ *
+ * `total` 是范围内总条数、`returned` 是本次返回条数：两者不等即说明被 limit 截断，
+ * 界面据此提示「仅展示最近 N 条」，而不是让用户以为数据丢了。
+ */
+export interface GatewayRequestsSnapshot {
+  enabled: boolean;
+  generatedAt: number;
+  /** 统计范围（近 N 天）；null = 全部历史。 */
+  rangeDays?: number | null;
+  /** 范围内总条数（不受 limit 限制）。 */
+  total: number;
+  /** 本次返回条数。 */
+  returned: number;
+  /** 按 ts 降序，最新在前。 */
+  requests: GatewayRequestRecord[];
+}
+
+/** get_gateway_usage_requests 的统一响应：网关不可达时 usage 为 null 且带 error。 */
+export interface GatewayRequestsResult {
+  running: boolean;
+  reachable: boolean;
+  usage: GatewayRequestsSnapshot | null;
+  error: string | null;
+}
+
 /** get_gateway_usage 的统一响应：网关不可达时 usage 为 null 且带 error。 */
 export interface GatewayUsageResult {
   running: boolean;

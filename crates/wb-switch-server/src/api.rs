@@ -117,6 +117,7 @@ pub fn router() -> Router {
         .route("/api/gateway/restart", post(api_gateway_restart))
         .route("/api/gateway/models", get(api_gateway_models))
         .route("/api/gateway/usage", get(api_gateway_usage))
+        .route("/api/gateway/usage/requests", get(api_gateway_usage_requests))
         .route("/api/gateway/log", get(api_gateway_log))
         // ---- 一键导入：接入本机 AI 客户端 ----
         .route("/api/gateway/agents", get(api_agents_detect))
@@ -146,13 +147,12 @@ fn json_err(e: String, code: StatusCode) -> Response {
 
 async fn api_status() -> Response {
     let auth = auth_file::read_auth_file();
-    let current = auth.as_ref().and_then(|a| {
+    // 必须经 core 的 current_account_view 规整：加密信封对象 `{ $wbEncrypted,
+    // envelope }` 若原样透传，前端把 nickname 作为 React 子节点渲染时抛 #31
+    // 白屏（issue #40；与 Tauri 通道 #39 同源 —— 规整逻辑必须收敛到 core 单点）。
+    let current = auth.as_ref().map(|a| {
         let acct = a.get("account").cloned().unwrap_or_else(|| json!({}));
-        Some(json!({
-            "uid": acct.get("uid"),
-            "nickname": acct.get("nickname"),
-            "email": acct.get("email"),
-        }))
+        account::current_account_view(&acct)
     });
     json_ok(json!({
         "running": cached_workbuddy_running(),
@@ -981,6 +981,20 @@ async fn api_gateway_usage(Query(params): Query<HashMap<String, String>>) -> Res
         .and_then(|v| v.parse::<i64>().ok())
         .filter(|d| *d > 0);
     json_ok(wb_switch_core::modules::gateway::fetch_usage(days).await)
+}
+
+/// GET /api/gateway/usage/requests?days=7&limit=200 —— 逐条请求明细。
+///
+/// days 省略 = 全部历史；limit 省略 = 网关默认上限。两者非正值一律当缺省处理，
+/// 与网关端点自身的容错口径保持一致。
+async fn api_gateway_usage_requests(Query(params): Query<HashMap<String, String>>) -> Response {
+    let parse = |key: &str| {
+        params
+            .get(key)
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|d| *d > 0)
+    };
+    json_ok(wb_switch_core::modules::gateway::fetch_usage_requests(parse("days"), parse("limit")).await)
 }
 
 /// GET /api/gateway/agents —— 探测全部客户端的安装与配置状态。

@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import * as api from "@/lib/api";
+import { displayText } from "@/lib/utils";
 import type {
   AccountMeta,
   LocalAccountFreshness,
@@ -29,7 +30,7 @@ interface Props {
 
 /** 候选账号展示名（与账号卡片一致）。 */
 function candidateLabel(meta: AccountMeta): string {
-  return meta.nickname || meta.email || meta.uid || meta.id;
+  return displayText(meta.nickname) ?? displayText(meta.email) ?? displayText(meta.uid) ?? meta.id;
 }
 
 /** 只展示到分钟，避免把毫秒时间戳直接抛给用户。 */

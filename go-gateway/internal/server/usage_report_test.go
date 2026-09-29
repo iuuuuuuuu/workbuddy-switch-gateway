@@ -163,3 +163,41 @@ func TestUsageEndpointRequiresAuth(t *testing.T) {
 		t.Fatalf("带凭据应 200，实际 %d", rec.Code)
 	}
 }
+
+func TestUsageRequestsEndpoint(t *testing.T) {
+	h, stats := usageHandler(t, "")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"deepseek-v4","stream":true,"messages":[]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("chat code=%d", rec.Code)
+	}
+
+	body := usageRequest(t, h, "/usage/requests?days=1&limit=50")
+	if body["enabled"] != true {
+		t.Fatalf("enabled 应为 true: %v", body)
+	}
+	reqs, ok := body["requests"].([]any)
+	if !ok || len(reqs) == 0 {
+		t.Fatalf("requests 应有数据: %v", body)
+	}
+	first := reqs[0].(map[string]any)
+	if first["model"] != "deepseek-v4" {
+		t.Errorf("model 应为 deepseek-v4, 实际 %v", first["model"])
+	}
+	if first["entry"] != "chat" {
+		t.Errorf("entry 应为 chat, 实际 %v", first["entry"])
+	}
+
+	// 禁用统计器时的行为
+	hNoStats := NewHandler(Config{
+		Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+	})
+	noStatsBody := usageRequest(t, hNoStats, "/usage/requests")
+	if noStatsBody["enabled"] != false {
+		t.Fatalf("未装配统计器时 enabled 应为 false: %v", noStatsBody)
+	}
+	_ = stats
+}
+

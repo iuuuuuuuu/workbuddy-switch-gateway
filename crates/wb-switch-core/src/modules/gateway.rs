@@ -1866,6 +1866,85 @@ pub async fn fetch_usage(days: Option<i64>) -> Value {
         Err(e) => fail(e.to_string()),
     }
 }
+/// 从运行中的网关拉取逐条请求明细（GET /usage/requests）。
+///
+/// `days` 为统计范围（近 N 天，含今天）；None 或非正值表示全部历史。
+/// `limit` 为条数上限；None 或非正值时交给网关按默认值处理。
+///
+/// 与 `fetch_usage` 一样不抛错：网关未运行 / 未就绪 / 返回异常时同样给出结构化的
+/// `{ running, reachable, usage: null, error }`，由调用方决定展示哪种提示。
+///
+/// 不合并进 `fetch_usage` 的原因：聚合快照与明细表是两块独立内容，合并后
+/// 「只刷新明细」会退化成全量请求，且任一侧失败会连带拖垮另一侧。
+pub async fn fetch_usage_requests(days: Option<i64>, limit: Option<i64>) -> Value {
+    let cfg = load_gateway_config();
+    let port = cfg.get("port").and_then(Value::as_u64).unwrap_or(7863) as u16;
+    let api_key = cfg
+        .get("api_key")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    // 只在显式给了正数时才拼参数：网关对「缺省」与「非法值」的处理一致（都回落到
+    // 默认值），少拼一个参数让 URL 更易读，也避免把 0 当成有效范围传下去。
+    let mut query = String::new();
+    if let Some(d) = days.filter(|d| *d > 0) {
+        query.push_str(&format!("days={d}"));
+    }
+    if let Some(l) = limit.filter(|l| *l > 0) {
+        if !query.is_empty() {
+            query.push_str("&");
+        }
+        query.push_str(&format!("limit={l}"));
+    }
+    let mut url = format!("http://127.0.0.1:{port}/usage/requests");
+    if !query.is_empty() {
+        url.push_str("?");
+        url.push_str(&query);
+    }
+
+    let running = is_running();
+    let fail = |error: String| {
+        json!({
+            "running": running,
+            "reachable": false,
+            "usage": Value::Null,
+            "error": error,
+        })
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(2500))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return fail(format!("无法创建 HTTP 客户端: {e}")),
+    };
+
+    let mut req = client.get(&url);
+    if !api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {api_key}"));
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            if !resp.status().is_success() {
+                return fail(format!("网关 /usage/requests 返回 HTTP {status}"));
+            }
+            match resp.json::<Value>().await {
+                Ok(v) => json!({
+                    "running": running,
+                    "reachable": true,
+                    "usage": v,
+                    "error": Value::Null,
+                }),
+                Err(e) => fail(format!("解析网关 /usage/requests 响应失败: {e}")),
+            }
+        }
+        Err(e) => fail(e.to_string()),
+    }
+}
 
 #[cfg(test)]
 mod tests {

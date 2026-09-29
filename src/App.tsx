@@ -7,7 +7,7 @@ import * as api from "@/lib/api";
 import type { UpdateInfo } from "@/lib/types";
 import AccountsPage from "@/pages/AccountsPage";
 import CreditStatsPage from "@/pages/CreditStatsPage";
-import TokenStatsPage from "@/pages/TokenStatsPage";
+import UsageRecordsPage from "@/pages/UsageRecordsPage";
 import GatewayPage from "@/pages/GatewayPage";
 import AgentsPage from "@/pages/AgentsPage";
 import SettingsPage from "@/pages/SettingsPage";
@@ -149,7 +149,7 @@ function Layout() {
             <User className="size-4" />
             账号管理
           </NavLink>
-          <NavLink to="/token-stats" className={({ isActive }) => cn("flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors", isActive ? "bg-foreground/[0.06] font-medium text-foreground" : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground")}><MessagesSquare className="size-4" />Token 统计</NavLink>
+          <NavLink to="/usage-records" className={({ isActive }) => cn("flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors", isActive ? "bg-foreground/[0.06] font-medium text-foreground" : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground")}><MessagesSquare className="size-4" />使用记录</NavLink>
           <NavLink
             to="/credit-stats"
             className={({ isActive }) =>
@@ -233,7 +233,7 @@ export default function App() {
           <Route element={<Layout />}>
             <Route path="/" element={<AccountsPage />} />
             <Route path="/credit-stats" element={<CreditStatsPage />} />
-            <Route path="/token-stats" element={<TokenStatsPage />} />
+            <Route path="/usage-records" element={<UsageRecordsPage />} />
             <Route path="/gateway" element={<GatewayPage />} />
             <Route path="/agents" element={<AgentsPage />} />
             <Route path="/settings" element={<SettingsPage />} />

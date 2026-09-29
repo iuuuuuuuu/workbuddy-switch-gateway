@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import * as api from "@/lib/api";
 import type { AccountMeta } from "@/lib/types";
+import { displayText } from "@/lib/utils";
 
 interface Props {
   open: boolean;
@@ -24,7 +25,7 @@ interface Props {
 
 /** 账号展示名（与账号卡片一致）。 */
 function accountLabel(a: AccountMeta): string {
-  return a.nickname || a.email || a.uid || a.id;
+  return displayText(a.nickname) ?? displayText(a.email) ?? displayText(a.uid) ?? a.id;
 }
 
 /** 导出文件名：wb-switch-accounts-YYYY-MM-DD.json */

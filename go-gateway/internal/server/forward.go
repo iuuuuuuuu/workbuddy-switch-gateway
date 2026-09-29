@@ -18,6 +18,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"workbuddy2api/internal/auth"
@@ -216,19 +217,25 @@ func (h *Handler) forwardChat(body []byte, stream bool, sessKey string) (*chatRe
 			// 不罚账号也不换号：账号状态完全不动（applyErrorPolicy 对请求侧错误
 			// 本就只换号不罚，这里连换号都省掉）。
 			//
-			// 这是**唯一**改变对外状态码的路径；其余失败仍沿用原有的
-			// 503 no_healthy_account 契约（账号池耗尽的语义）。
+			// 上下文超长与安全审查属于**请求侧**错误：换号无用（同一请求体发给任何账号都同样失败），
+			// 立即以真实状态返回，交由客户端调整后重试。
+			// 不罚账号也不换号：账号状态完全不动。
 			if kind == upstream.ErrContextTooLong {
 				uid := acct.UID
 				releaseHeld()
-				// 带上 UID：调用方在失败路径也要读 result.UID 记日志，
-				// 返回 nil 会让它空指针崩溃（本测试即抓到此点）。
 				return &chatResult{UID: uid}, status, &forwardFailure{
-					Kind:   FailureContextTooLong,
-					Status: status,
-					// 保留上游原文：下游客户端靠文案识别上下文溢出并触发自动压缩，
-					// 只回我们自己的措辞会让它认不出这是溢出。
+					Kind:    FailureContextTooLong,
+					Status:  status,
 					Message: upstream.ContextTooLongMessage(string(respBody)),
+				}
+			}
+			if kind == upstream.ErrContentSafety {
+				uid := acct.UID
+				releaseHeld()
+				return &chatResult{UID: uid}, http.StatusBadRequest, &forwardFailure{
+					Kind:    FailureContentSafety,
+					Status:  http.StatusBadRequest,
+					Message: upstream.ContentSafetyMessage(string(respBody)),
 				}
 			}
 
@@ -270,11 +277,19 @@ func (h *Handler) forwardChat(body []byte, stream bool, sessKey string) (*chatRe
 		} else if lastTransportErr != nil {
 			msg = "无法连接上游（网络超时 / 连接被拒）：请检查本机网络或代理设置后重试"
 		} else {
-			msg += ": " + lastErr.Error()
+			msg += ": " + sanitizeUpstreamErrorText(lastErr.Error())
 		}
 	}
 	// 失败时也带上最后尝试过的账号，请求日志据此仍能显示 uid（与原实现一致）。
 	return &chatResult{UID: lastUID}, lastStatus, errors.New(msg)
+}
+
+// sanitizeUpstreamErrorText 移除错误文本中可能误导客户端（如 DSH 正则判定 AUTH）的 401/403 字样。
+func sanitizeUpstreamErrorText(s string) string {
+	reHTTP := regexp.MustCompile(`\bhttp\s+(401|403)\b`)
+	s = reHTTP.ReplaceAllString(s, "http rejected")
+	reNum := regexp.MustCompile(`\b(401|403)\b`)
+	return reNum.ReplaceAllString(s, "rejected")
 }
 
 // FailureKind 失败类别：决定回给客户端的错误码。
@@ -290,6 +305,8 @@ const (
 	FailureUpstream FailureKind = iota
 	// FailureContextTooLong 请求上下文超出模型窗口：请求侧错误，换号无用。
 	FailureContextTooLong
+	// FailureContentSafety 请求内容未通过安全审查：请求侧错误，换号无用。
+	FailureContentSafety
 )
 
 // forwardFailure 一次需要特殊上报的转发失败。

@@ -689,8 +689,18 @@ export default function AccountsPage() {
       ? orderedAccounts.find((account) => hasExpiringSoonCredits(creditMap[account.id]))?.id
       : undefined;
   const cliCurrentAccountId = codebuddyCli?.activeAccountId;
+  // 显示名兜底规整：后端理论上保证 current 三字段为 string|null（issue #39/#40），
+  // 但 webui/桌面双通道 + 未来新增通道都可能漏网；对象一旦漏到这里并被作为
+  // React 子节点渲染，就会抛 #31 白屏。这里只接受非空字符串，是最后一道防线。
+  const pickDisplayName = (value: unknown): string | null => {
+    if (typeof value === "string" && value.trim() !== "") return value;
+    return null;
+  };
   const workbuddyCurrentName = current
-    ? current.nickname || current.email || current.uid || "未知账号"
+    ? pickDisplayName(current.nickname) ??
+      pickDisplayName(current.email) ??
+      pickDisplayName(current.uid) ??
+      "未知账号"
     : "未登录";
   const codebuddyCurrentName = codebuddyCli?.configured
     ? codebuddyCli.activeAccountName || "未检测到"

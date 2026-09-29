@@ -50,9 +50,9 @@ pub fn preview_accounts(text: &str) -> Result<Value, String> {
         .map(|(index, item)| {
             json!({
                 "index": index,
-                "uid": item.get("uid"),
-                "nickname": item.get("nickname"),
-                "email": item.get("email"),
+                "uid": account::display_string(item.get("uid")),
+                "nickname": account::display_string(item.get("nickname")),
+                "email": account::display_string(item.get("email")),
                 "hasToken": account::get_str(item, "access_token").is_some(),
             })
         })
@@ -446,6 +446,27 @@ mod tests {
         assert_eq!(written[0]["access_token"], "token-a1", "导出文件保留 token");
     }
 
+
+    /// 回归：preview_accounts 的展示字段必须归一成 string|null。导入文件是
+    /// 用户可控 JSON，若混入加密信封对象 `{ $wbEncrypted, envelope }`，
+    /// 原样透传到前端预览列表会触发 React #31 白屏（issue #40 同源）。
+    #[test]
+    fn preview_accounts_coerces_envelope_display_fields() {
+        let text = r#"[
+            {
+                "uid": { "$wbEncrypted": 1, "envelope": "e1" },
+                "nickname": { "$wbEncrypted": 1, "envelope": "e2" },
+                "email": "x@y.z",
+                "access_token": "AT"
+            }
+        ]"#;
+        let preview = preview_accounts(text).unwrap();
+        let item = &preview["accounts"][0];
+        assert!(item["uid"].is_null(), "信封对象 uid 必须归一成 null");
+        assert!(item["nickname"].is_null(), "信封对象 nickname 必须归一成 null");
+        assert_eq!(item["email"], "x@y.z", "正常字符串不受影响");
+        assert_eq!(item["hasToken"], true, "token 探测不受展示字段规整影响");
+    }
     #[test]
     fn write_records_to_file_rejects_bad_name() {
         let dir = std::env::temp_dir();

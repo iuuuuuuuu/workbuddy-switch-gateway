@@ -168,10 +168,6 @@ function formatUsageCompact(value: number): string {
   return exactTokenFormatter.format(value);
 }
 
-/** 一组数值的最大值（至少为 1，避免除零）。 */
-function maxOf(values: number[]): number {
-  return values.reduce((max, value) => Math.max(max, value), 1);
-}
 
 /**
  * 界面上标识一个账号的名字：**备注 → 上游昵称 → uid 前缀**。
@@ -183,33 +179,6 @@ function maxOf(values: number[]): number {
  */
 function accountLabel(account: { uid: string; nickname?: string; note?: string }): string {
   return account.note?.trim() || account.nickname?.trim() || account.uid.slice(0, 8);
-}
-
-/** 用量分布行：名称 + 占比条 + 数值（可带底部说明）。 */
-function UsageBarRow({
-  label,
-  value,
-  max,
-  meta,
-}: {
-  label: string;
-  value: number;
-  max: number;
-  meta?: string;
-}) {
-  const percent = max > 0 ? Math.max(3, Math.round((value / max) * 100)) : 0;
-  return (
-    <div className="space-y-1.5 px-4 py-2 sm:px-5">
-      <div className="flex items-baseline justify-between gap-3 text-xs">
-        <span className="min-w-0 truncate">{label}</span>
-        <span className="shrink-0 tabular-nums text-muted-foreground">{formatUsageCompact(value)}</span>
-      </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-        <div className="h-full rounded-full bg-primary/70" style={{ width: `${percent}%` }} />
-      </div>
-      {meta ? <div className="truncate text-[11px] text-muted-foreground">{meta}</div> : null}
-    </div>
-  );
 }
 
 /** 从监听地址（":7863" / "0.0.0.0:7863"）解析端口。 */
@@ -968,19 +937,7 @@ export default function GatewayPage() {
   // 用量区块的派生数据。
   const usageSnapshot = usage?.usage ?? null;
   const usageSummary = usageSnapshot?.summary ?? null;
-  const usageModels = usageSnapshot?.models ?? [];
   const usageAccounts = usageSnapshot?.accounts ?? [];
-  const usageDaily = usageSnapshot?.daily ?? [];
-  const usageMaxModel = maxOf(usageModels.map((m) => m.total));
-  const usageMaxAccount = maxOf(usageAccounts.map((a) => a.total));
-  const usageMaxDaily = maxOf(usageDaily.map((d) => d.total));
-  const usageNickname = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const account of status?.accounts ?? []) {
-      map.set(account.uid, accountLabel(account));
-    }
-    return map;
-  }, [status?.accounts]);
 
   /** uid → 该账号在所选范围内的 Token 用量（卡片直接取用）。 */
   const usageByUid = useMemo(
@@ -1568,211 +1525,29 @@ export default function GatewayPage() {
         )}
       </Section>
 
-      {/* Token 用量区块：**仅旧版布局**展示。
-          新版布局（merged）已把用量并进账号卡片，再重复一整块会让页面冗长，
-          且同一份数据出现两处、日期筛选也要跟着放两份 —— 故新版下隐藏。 */}
-      {layout === "classic" ? (
-      <Section
-        title="Token 用量"
-        description="经网关成功请求的上游用量，按模型 / 账号 / 日期聚合（网关重启后保留）"
-      >
+      {/* 用量明细已迁到独立的「使用记录」页，这里只留一个入口。
+          此前网关页自己渲染了一整块「Token 用量」（总览 + 按模型 + 按账号 + 每日柱图），
+          与新的记录页是同一份数据、两处维护 —— 两边各自持有一套筛选状态，
+          切换范围后看到的数字会不一致，属于典型的「重复 UI 漂移」。 */}
+      <Section title="使用记录" description="Token 用量与逐条请求明细，已迁到独立页面">
         <Row>
           <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-              <span className="text-[13px]">统计范围</span>
-              {/* 上次更新时间：让用户知道看到的数据有多新，不必反复手点刷新。
-                  相对时间由每秒 tick 驱动；悬停可见精确时刻。 */}
-              {usageUpdatedAt ? (
-                <span
-                  className="text-[11px] tabular-nums text-muted-foreground"
-                  title={`上次更新：${new Date(usageUpdatedAt).toLocaleString("zh-CN")}`}
-                >
-                  上次更新 {formatRelativeTime(nowTick - usageUpdatedAt)}
-                  {usageLoading ? " · 更新中…" : ""}
-                </span>
-              ) : null}
-            </div>
+            <div className="text-[13px]">Token 用量</div>
             <div className="mt-0.5 text-[11px] tabular-nums text-muted-foreground">
               {usageSummary
-                ? `共 ${exactTokenFormatter.format(usageSummary.records)} 次调用 · 合计 ${exactTokenFormatter.format(usageSummary.total)} tokens`
-                : "等待网关数据"}
+                ? "共 " +
+                  exactTokenFormatter.format(usageSummary.records) +
+                  " 次调用 · 合计 " +
+                  exactTokenFormatter.format(usageSummary.total) +
+                  " tokens"
+                : "查看经网关成功请求的上游用量，按模型 / 账号 / 日期聚合"}
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-1.5">
-            {USAGE_RANGE_OPTIONS.map((option) => (
-              <Button
-                key={option.key}
-                variant={usageRange === option.key ? "default" : "outline"}
-                size="sm"
-                className="h-7 px-2 text-xs"
-                onClick={() => setUsageRange(option.key)}
-              >
-                {option.label}
-              </Button>
-            ))}
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-7"
-              onClick={() => setUsageNonce((value) => value + 1)}
-              disabled={usageLoading}
-              aria-label="刷新用量"
-            >
-              <RefreshCw className={cn("size-3.5", usageLoading && "animate-spin")} />
-            </Button>
-          </div>
+          <Button size="sm" variant="outline" className="h-7 shrink-0 text-xs" asChild>
+            <Link to="/usage-records">前往使用记录 →</Link>
+          </Button>
         </Row>
-
-        {usageLoading && !usageSnapshot ? (
-          <Row className="justify-center">
-            <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
-              <Loader2 className="size-3.5 animate-spin" />
-              正在读取网关用量…
-            </div>
-          </Row>
-        ) : (usage && !usage.running) || !running ? (
-          <Row className="justify-center">
-            <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
-              <CheckCircle2 className="size-3.5" />
-              网关未运行，启动后这里会展示经网关请求的 Token 用量
-            </div>
-          </Row>
-        ) : !usage?.reachable ? (
-          <Row className="justify-center">
-            <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
-              <Activity className="size-3.5" />
-              网关已启动但暂时无法读取用量{usage?.error ? `：${usage.error}` : ""}
-            </div>
-          </Row>
-        ) : usageSnapshot?.enabled === false ? (
-          <Row className="justify-center">
-            <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
-              <AlertTriangle className="size-3.5" />
-              当前网关可执行文件不支持用量统计，请更新网关后重试
-            </div>
-          </Row>
-        ) : usageSnapshot && usageSummary ? (
-          <>
-            <div className="mx-4 grid grid-cols-2 gap-2 py-3 sm:mx-5 sm:grid-cols-4">
-              <Stat
-                label="总 Token"
-                value={formatUsageCompact(usageSummary.total)}
-                hint={exactTokenFormatter.format(usageSummary.total)}
-              />
-              <Stat
-                label="输入"
-                value={formatUsageCompact(usageSummary.input)}
-                hint={
-                  usageSummary.cacheHitRate != null
-                    ? `缓存命中率 ${(usageSummary.cacheHitRate * 100).toFixed(1)}%`
-                    : "无缓存读取数据"
-                }
-              />
-              <Stat
-                label="输出"
-                value={formatUsageCompact(usageSummary.output)}
-                hint={`缓存写入 ${formatUsageCompact(usageSummary.cacheWrite)}`}
-              />
-              <Stat
-                label="调用次数"
-                value={exactTokenFormatter.format(usageSummary.records)}
-                hint="成功请求"
-              />
-            </div>
-
-            <div className="grid gap-4 border-t border-border/50 pb-2 pt-3 sm:grid-cols-2">
-              <div className="min-w-0">
-                <div className="px-4 text-[12px] font-medium text-muted-foreground sm:px-5">
-                  按模型
-                  {usageModels.length > 0 ? (
-                    <span className="ml-1.5 font-normal text-muted-foreground/70">
-                      共 {usageModels.length} 个
-                    </span>
-                  ) : null}
-                </div>
-                <div className="mt-1 max-h-72 overflow-y-auto">
-                  {usageModels.length > 0 ? (
-                    usageModels.map((model) => (
-                      <UsageBarRow
-                        key={model.key}
-                        label={model.key}
-                        value={model.total}
-                        max={usageMaxModel}
-                        meta={`${exactTokenFormatter.format(model.records)} 次调用 · 输入 ${formatUsageCompact(model.input)} / 输出 ${formatUsageCompact(model.output)}`}
-                      />
-                    ))
-                  ) : (
-                    <div className="px-4 py-2 text-xs text-muted-foreground sm:px-5">该范围内暂无数据</div>
-                  )}
-                </div>
-              </div>
-              <div className="min-w-0">
-                <div className="px-4 text-[12px] font-medium text-muted-foreground sm:px-5">
-                  按账号
-                  {usageAccounts.length > 0 ? (
-                    <span className="ml-1.5 font-normal text-muted-foreground/70">
-                      共 {usageAccounts.length} 个
-                    </span>
-                  ) : null}
-                </div>
-                {/*
-                  这里**不能**截断成前 5 个：账号池的均衡效果正是靠这个列表观察的。
-                  原先写死 slice(0, 5)，导致 8 个账号都在正常轮转、界面却只显示 5 个，
-                  用户据此误判「负载均衡只用到 5 个账号」。
-                  改为全量展示并加滚动上限（高度受限，避免账号多时把页面撑得过长）。
-                */}
-                <div className="mt-1 max-h-72 overflow-y-auto">
-                  {usageAccounts.length > 0 ? (
-                    usageAccounts.map((account) => (
-                      <UsageBarRow
-                        key={account.key}
-                        label={usageNickname.get(account.key) ?? `${account.key.slice(0, 8)}…`}
-                        value={account.total}
-                        max={usageMaxAccount}
-                        meta={`${exactTokenFormatter.format(account.records)} 次调用 · ${account.key.slice(0, 8)}`}
-                      />
-                    ))
-                  ) : (
-                    <div className="px-4 py-2 text-xs text-muted-foreground sm:px-5">该范围内暂无数据</div>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {usageDaily.length > 0 ? (
-              <div className="border-t border-border/50 px-4 pb-3 pt-3 sm:px-5">
-                <div className="text-[12px] font-medium text-muted-foreground">每日用量</div>
-                <div className="mt-2 flex h-16 items-end gap-1">
-                  {usageDaily.slice(-30).map((day) => (
-                    <div
-                      key={day.key}
-                      className="flex h-full flex-1 items-end"
-                      title={`${day.key} · ${exactTokenFormatter.format(day.total)} tokens · ${day.records} 次调用`}
-                    >
-                      <div
-                        className="w-full rounded-t-[3px] bg-primary/60 transition-colors hover:bg-primary"
-                        style={{ height: `${Math.max(4, Math.round((day.total / usageMaxDaily) * 100))}%` }}
-                      />
-                    </div>
-                  ))}
-                </div>
-                <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
-                  <span>{usageDaily[Math.max(0, usageDaily.length - 30)]?.key}</span>
-                  <span>{usageDaily[usageDaily.length - 1]?.key}</span>
-                </div>
-              </div>
-            ) : null}
-          </>
-        ) : (
-          <Row className="justify-center">
-            <div className="flex items-center gap-2 py-4 text-xs text-muted-foreground">
-              <AlertTriangle className="size-3.5" />
-              无法读取网关用量{usage?.error ? `：${usage.error}` : ""}
-            </div>
-          </Row>
-        )}
       </Section>
-      ) : null}
 
       <Section title="客户端接入" description="把网关接入本机已安装的 AI 客户端，或按标准环境变量接入">
         <div className="space-y-4 p-4 sm:p-5">

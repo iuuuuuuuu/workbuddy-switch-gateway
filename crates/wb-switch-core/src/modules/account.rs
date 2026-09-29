@@ -115,6 +115,21 @@ pub fn display_string(v: Option<&Value>) -> Value {
     }
 }
 
+/// 「当前账号」展示视图（uid / nickname / email，全部强制 string | null）。
+///
+/// 鉴权文件里的加密信封对象 `{ $wbEncrypted, envelope }`（issue #38 复现数据）
+/// 只接受字符串，其余一律归一成 null。三条出码通道（Tauri `get_status`、
+/// webui `GET /api/status`、CLI `status` 子命令）都必须经此构造，任何一条
+/// 自己拼 JSON 都会复现 React #31 白屏（#39 修了 Tauri 通道后，webui 通道
+/// 又因自拼 JSON 原样透传，教训是规整逻辑必须收敛到 core 单点）。
+pub fn current_account_view(acct: &Value) -> Value {
+    json!({
+        "uid": display_string(acct.get("uid")),
+        "nickname": display_string(acct.get("nickname")),
+        "email": display_string(acct.get("email")),
+    })
+}
+
 /// 账号的展示元数据（不泄露 token）。对照 server.py `account_meta`。
 pub fn account_meta(acc: &Value) -> Value {
     // 区域由 domain 后缀推导（国服 .cn / 国际版 .ai），供界面区分展示。
@@ -403,6 +418,22 @@ mod tests {
         assert!(display_string(Some(&envelope)).is_null(), "信封对象必须归一成 null");
         assert!(display_string(Some(&json!([1, 2, 3]))).is_null(), "数组必须归一成 null");
         assert!(display_string(None).is_null(), "缺失必须为 null");
+    }
+
+    /// 回归：current_account_view 是 issue #40 的统一防线 —— 三条出码通道
+    /// （Tauri get_status / webui GET /api/status / CLI status）共用，
+    /// 任何一条自拼 JSON 都会复现 webui 通道的 React #31 白屏。
+    #[test]
+    fn current_account_view_coerces_envelope_to_null() {
+        let acct = json!({
+            "uid": { "$wbEncrypted": 1, "envelope": "e1" },
+            "nickname": { "$wbEncrypted": 1, "envelope": "e2" },
+            "email": "x@y.z",
+        });
+        let view = current_account_view(&acct);
+        assert!(view["uid"].is_null(), "信封对象 uid 必须归一成 null");
+        assert!(view["nickname"].is_null(), "信封对象 nickname 必须归一成 null");
+        assert_eq!(view["email"], "x@y.z", "正常字符串不受影响");
     }
 
     /// 回归：account_meta 的身份展示字段（uid / email / nickname / enterpriseName）

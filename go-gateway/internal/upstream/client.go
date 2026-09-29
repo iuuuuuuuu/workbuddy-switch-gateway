@@ -42,6 +42,12 @@ const (
 	// 对着每个账号重传一遍（2026-09-15 实测：1.12M token 的请求被重传 3 次），
 	// 最后还被包装成 503 no_healthy_account，把排查方向引向「账号故障」。
 	ErrContextTooLong
+	// ErrContentSafety 请求内容未通过安全审核（HTTP 403 code=11140）。
+	//
+	// 同为**请求侧**错误：换号重试无意义（同一内容给任何账号发都会被拦截）。
+	// 立即失败并以清晰的审核文案告知客户端，避免下游客户端（如 DSH）
+	// 将 403 / upstream client 误判为鉴权失败（API 密钥无效）。
+	ErrContentSafety
 )
 
 func (k ErrKind) String() string {
@@ -62,6 +68,8 @@ func (k ErrKind) String() string {
 		return "model_rate"
 	case ErrContextTooLong:
 		return "context_too_long"
+	case ErrContentSafety:
+		return "content_safety"
 	default:
 		return "none"
 	}
@@ -184,6 +192,75 @@ func IsContextTooLong(body string) bool {
 	}
 	return false
 }
+
+// contentSafetyCode 上游「内容未通过安全审查」的业务码。
+const contentSafetyCode = 11140
+
+var contentSafetyCodes = []int{contentSafetyCode}
+
+// contentSafetyMarkers 内容未通过安全审查的文案特征。
+var contentSafetyMarkers = []string{
+	"内容未通过安全",
+	"內容未通過安全",
+	"safety review",
+	"request illegal",
+}
+
+// IsContentSafety 报告上游响应是否为「内容未通过安全审查」。
+func IsContentSafety(body string) bool {
+	var env apiEnvelope
+	if json.Unmarshal([]byte(body), &env) == nil {
+		for _, code := range contentSafetyCodes {
+			if env.Code == code {
+				return true
+			}
+		}
+	}
+	lower := strings.ToLower(body)
+	for _, m := range contentSafetyMarkers {
+		if strings.Contains(body, m) || strings.Contains(lower, strings.ToLower(m)) {
+			return true
+		}
+	}
+	return false
+}
+
+// ContentSafetyMessage 提炼安全审查的上游提示，消除可能被下游（如 DSH）正则误判为 AUTH 的 403 字样，同时保留完整的状态与业务信息。
+func ContentSafetyMessage(body string) string {
+	var env struct {
+		Code       int    `json:"code"`
+		Msg        string `json:"msg"`
+		RequestID  string `json:"requestId"`
+		DisplayMsg struct {
+			Zh string `json:"zh"`
+			En string `json:"en"`
+		} `json:"displayMsg"`
+	}
+	_ = json.Unmarshal([]byte(body), &env)
+	code := env.Code
+	if code == 0 {
+		code = contentSafetyCode
+	}
+	detail := strings.TrimSpace(env.DisplayMsg.Zh)
+	if detail == "" {
+		detail = strings.TrimSpace(env.DisplayMsg.En)
+	}
+	if detail == "" {
+		detail = strings.TrimSpace(env.Msg)
+	}
+	if detail == "" {
+		detail = "请调整输入内容或减少敏感词后重试"
+	}
+	out := fmt.Sprintf("[上游拦截: HTTP Forbidden / Code %d] %s", code, detail)
+	if env.Msg != "" && env.Msg != detail {
+		out += fmt.Sprintf(" (%s)", env.Msg)
+	}
+	if env.RequestID != "" {
+		out += fmt.Sprintf(" [requestId: %s]", env.RequestID)
+	}
+	return out
+}
+
 
 // resetTimeRe 从报错文案里提取重置时刻。
 //
@@ -349,6 +426,8 @@ func FriendlyMessage(kind ErrKind, status int, body string) string {
 		return "账号登录态已失效，需在「账号管理」页重新登录"
 	case kind == ErrNotFound:
 		return "上游返回 404（接口或模型不存在），已短暂冷却并切换账号"
+	case kind == ErrContentSafety || IsContentSafety(body):
+		return ContentSafetyMessage(body)
 	case kind == ErrServer && status > 0:
 		return "上游服务异常（HTTP " + strconv.Itoa(status) + "），已切换到其他账号"
 	}
@@ -389,6 +468,9 @@ func Classify(status int, body string) ErrKind {
 	// 放在 429 之后是有意的：429 一律按限流归类，保持既有语义不变。
 	if IsContextTooLong(body) {
 		return ErrContextTooLong
+	}
+	if IsContentSafety(body) {
+		return ErrContentSafety
 	}
 	if status == http.StatusNotFound {
 		return ErrNotFound

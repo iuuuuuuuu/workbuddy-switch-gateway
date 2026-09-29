@@ -475,7 +475,14 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stat := newChatStat(nowFunc(), body, true)
+	var req responsesRequest
+	_ = json.Unmarshal(body, &req)
+
+	stat := newChatStat(nowFunc(), body, req.Stream)
+	stat.model = req.Model
+	stat.mode = "responses"
+	stat.entry = "responses"
+	stat.stream = req.Stream
 	defer func() {
 		stat.done()
 		h.recordUsage(stat)
@@ -487,11 +494,6 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, responsesError(http.StatusBadRequest, "invalid_request", err.Error()))
 		return
 	}
-
-	var req responsesRequest
-	_ = json.Unmarshal(body, &req)
-	stat.model = req.Model
-	stat.mode = "responses"
 
 	result, status, ferr := h.forwardChat(chatBody, req.Stream, sessKey)
 	if ferr != nil {

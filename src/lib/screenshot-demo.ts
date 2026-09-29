@@ -1,6 +1,7 @@
 import type {
   AccountMeta, AppStatus, AutoRotateConfig, CheckinConfig, CheckinLog,
   CodeBuddyCliStatus, CodeBuddyCliSwitchResult, CreditExpiry, CreditOfficialUsageModel, CreditStatistics,
+  GatewayRequestRecord, GatewayRequestsResult,
   GatewayUsageGroup, GatewayUsageResult,
   GithubConfig, RotateLog, RotateStatus, TokenStatistics, TokenStatsGroup, TokenStatsSource, TokenStatsTotals,
   TravelConfig, TravelStatus,
@@ -438,6 +439,93 @@ function demoGatewayUsage(days?: number): GatewayUsageResult {
   };
 }
 
+/**
+ * 演示用网关请求明细：与网关 /usage/requests 响应同构。
+ *
+ * 全部由固定种子推导（不读本地真实数据），因此每次渲染的数字稳定可比；
+ * uid 沿用上面的 demo-user-00x 体系，不出现任何真实用户标识。
+ */
+function demoGatewayUsageRequests(days?: number, limit?: number): GatewayRequestsResult {
+  const rangeDays = days && days > 0 ? days : null;
+  const dayCount = Math.min(14, rangeDays ?? 14);
+  // 与 demoGatewayUsage 同源的日权重：两张卡片的日分布看起来是同一批请求。
+  const waves = [0.85, 1.12, 0.74, 1.28, 0.92, 0.41, 0.63];
+  const entries = ["chat", "chat", "chat", "messages", "responses"];
+  const regions = ["cn", "cn", "intl", ""];
+  const models = MODEL_NAMES;
+  const uids = accounts.map((account) => account.uid ?? account.id);
+  // 失败样本的位置与状态码写死：既保证「少量失败」的观感稳定，也让截图可复现。
+  const failures: Record<number, number> = { 7: 429, 23: 500, 46: 400, 71: 502, 94: 401, 112: 429 };
+
+  const requests: GatewayRequestRecord[] = [];
+  for (let index = 0; index < 120; index += 1) {
+    // 每条记录落在「最近 dayCount 天」内的某个小时：高位取天数、低位取小时，保证跨天均匀。
+    const dayAgo = index % dayCount;
+    const hour = 8 + ((index * 7 + dayAgo * 3) % 13);
+    const minute = (index * 17) % 60;
+    const second = (index * 29) % 60;
+    const ts = atLocalTime(dayAgo, hour, minute) + second * 1000;
+    const wave = waves[(dayCount - 1 - dayAgo) % 7];
+    const model = models[index % models.length];
+    const stream = index % 5 !== 3;
+    const status = failures[index] ?? 200;
+    const failed = status >= 400;
+
+    // 缓存命中率约 8 成，与聚合卡片的口径一致；命中率高时缓存读取量也高。
+    const cacheHitRate = 0.62 + ((index * 13) % 27) / 100;
+    const input = failed ? 0 : Math.round((9_600 + ((index * 977) % 46_000)) * wave);
+    const cacheRead = failed ? 0 : Math.round(input * cacheHitRate);
+    const cacheWrite = failed ? 0 : Math.round(input * 0.02);
+    const output = failed ? 0 : Math.round((420 + ((index * 331) % 2_600)) * wave);
+    const totalMs = failed
+      ? 120 + ((index * 53) % 900)
+      : Math.round(1_800 + ((index * 617) % 9_400) * wave);
+    // tps 由 output / 耗时反推，保证与「耗时 / 输出」两列自洽。
+    const ttfbMs = failed || !stream ? 0 : Math.round(180 + ((index * 97) % 1_500) * wave);
+
+    requests.push({
+      seq: 12_000 + index,
+      ts,
+      model,
+      uid: uids[index % uids.length],
+      entry: entries[index % entries.length],
+      stream,
+      region: regions[index % regions.length],
+      status,
+      input,
+      output,
+      cacheRead,
+      cacheWrite,
+      total: input + output + cacheWrite,
+      cacheHitRate: failed || input === 0 ? null : cacheRead / input,
+      ttfbMs,
+      totalMs,
+      tps: output > 0 && totalMs > 0 ? output / (totalMs / 1000) : 0,
+    });
+  }
+
+  // 网关侧已按 ts 降序返回；演示数据同样排序，前端不必再做一次假设。
+  requests.sort((a, b) => b.ts - a.ts);
+
+  const cutoff = rangeDays ? Date.now() - rangeDays * 86_400_000 : null;
+  const inRange = cutoff ? requests.filter((row) => row.ts >= cutoff) : requests;
+  const limited = limit && limit > 0 ? inRange.slice(0, limit) : inRange;
+
+  return {
+    running: true,
+    reachable: true,
+    usage: {
+      enabled: true,
+      generatedAt: Date.now(),
+      rangeDays,
+      total: inRange.length,
+      returned: limited.length,
+      requests: limited,
+    },
+    error: null,
+  };
+}
+
 /** Read-only demo response provider. It never reads or mutates real user data. */
 export function screenshotDemoResponse(command: string, args?: Record<string, unknown>): unknown {
   const demoAccounts = hydratedAccounts();
@@ -463,6 +551,10 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
     case "get_credit_statistics": return buildStatistics();
     case "get_token_statistics": return demoTokenStatistics(typeof args?.days === "number" ? args.days : undefined);
     case "get_gateway_usage": return demoGatewayUsage(typeof args?.days === "number" ? args.days : undefined);
+    case "get_gateway_usage_requests": return demoGatewayUsageRequests(
+      typeof args?.days === "number" ? args.days : undefined,
+      typeof args?.limit === "number" ? args.limit : undefined,
+    );
     case "get_auto_checkin_config": return checkinConfig();
     case "get_checkin_logs": return { logs: checkinLogs() };
     case "get_travel_status": return travelStatus(String(args?.accountId ?? ""));

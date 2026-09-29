@@ -28,6 +28,7 @@ import type {
   GatewayModeSwitchResult,
   GatewayModelItem,
   GatewayLogResult,
+  GatewayRequestsResult,
   GatewayStartResult,
   GatewayStatus,
   GatewayPortCheck,
@@ -66,6 +67,7 @@ const DEMO_READ_COMMANDS = new Set([
   "get_github_config", "check_update", "get_launch_at_login_enabled", "switch_progress",
   "get_travel_status", "get_auto_travel_config",
   "get_gateway_usage",
+  "get_gateway_usage_requests",
 ]);
 
 export function isDemoMode(): boolean {
@@ -154,6 +156,7 @@ const ROUTES: Record<string, Route> = {
   sync_gateway_accounts: { method: "POST", path: "/api/gateway/sync" },
   get_gateway_models: { method: "GET", path: "/api/gateway/models" },
   get_gateway_usage: { method: "GET", path: "/api/gateway/usage" },
+  get_gateway_usage_requests: { method: "GET", path: "/api/gateway/usage/requests" },
   read_gateway_log: { method: "GET", path: "/api/gateway/log" },
   // ---- 一键导入：接入本机 AI 客户端 ----
   detect_agent_clients: { method: "GET", path: "/api/gateway/agents" },
@@ -705,6 +708,21 @@ export async function getGatewayModels(): Promise<GatewayModelItem[]> {
  */
 export function getGatewayUsage(days?: number): Promise<GatewayUsageResult> {
   return call<GatewayUsageResult>("get_gateway_usage", days && days > 0 ? { days } : undefined);
+}
+
+/**
+ * 读取网关请求明细（最近 N 天、最多 limit 条，按时间降序）。
+ *
+ * 与 `getGatewayUsage` 是两条独立通道：聚合用量走 /usage，明细走 /usage/requests。
+ * 分开的理由是明细数据量大得多，页面按需只取尾部若干条，聚合统计不必为此付出代价。
+ * 同样地，网关未运行 / 不可达时不抛错，由 running / reachable / error 区分状态。
+ */
+export function getGatewayUsageRequests(days?: number, limit?: number): Promise<GatewayRequestsResult> {
+  const args: Record<string, unknown> = {};
+  // 非正数一律视为「不限制」：传 0 或负数会被网关当成非法范围而返回空集，不如省略。
+  if (days && days > 0) args.days = days;
+  if (limit && limit > 0) args.limit = limit;
+  return call<GatewayRequestsResult>("get_gateway_usage_requests", Object.keys(args).length > 0 ? args : undefined);
 }
 
 /**

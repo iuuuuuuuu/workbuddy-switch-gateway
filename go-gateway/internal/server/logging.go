@@ -23,8 +23,11 @@ var chatLogEnabled = true
 
 // chatStat 单个 chat 请求的日志统计；handler 挂 defer，请求出口后落一行。
 type chatStat struct {
+	seq    int64
 	start  time.Time
 	model  string
+	entry  string // "chat" | "messages" | "responses"
+	stream bool
 	mode   string // "stream" | "sync"
 	uid    string // 完整 uid，展示时只取前 8 位
 	ttfb   time.Duration
@@ -58,7 +61,16 @@ func newChatStat(now time.Time, body []byte, stream bool) *chatStat {
 	if stream {
 		mode = "stream"
 	}
-	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
+	seq := chatSeq.Add(1)
+	return &chatStat{
+		seq:    seq,
+		start:  now,
+		model:  parseModelFromBody(body),
+		entry:  "chat",
+		stream: stream,
+		mode:   mode,
+		toks:   -1,
+	}
 }
 
 // done 幂等落一行表格日志。
@@ -67,7 +79,7 @@ func (s *chatStat) done() {
 		return
 	}
 	s.logged = true
-	logChatRow(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.status, s.toks)
+	logChatRowWithSeq(s.seq, s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.status, s.toks)
 }
 
 // chatStatsReader 在流式透传时抓取 SSE 末帧的 usage（completion_tokens 用于日志，
@@ -194,10 +206,14 @@ func uidPrefix(uid string) string {
 // logChatRow 打印一行请求级表格日志（直接输出 stdout，无 log 时间戳前缀）。
 // toks<0 表示 usage 缺失，显示 "-"。
 func logChatRow(ttfb, total time.Duration, model, mode, uid string, status int, toks int) {
+	logChatRowWithSeq(chatSeq.Add(1), ttfb, total, model, mode, uid, status, toks)
+}
+
+// logChatRowWithSeq 带指定 seq 打印一行请求级表格日志。
+func logChatRowWithSeq(seq int64, ttfb, total time.Duration, model, mode, uid string, status int, toks int) {
 	if !chatLogEnabled {
 		return
 	}
-	seq := chatSeq.Add(1)
 	if len(model) > 11 {
 		model = model[:11]
 	}

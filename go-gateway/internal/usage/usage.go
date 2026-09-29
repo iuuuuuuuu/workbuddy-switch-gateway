@@ -87,6 +87,7 @@ type fileState struct {
 	Days     map[string]Counters            `json:"days"`
 	Models   map[string]map[string]Counters `json:"models,omitempty"`
 	Accounts map[string]map[string]Counters `json:"accounts,omitempty"`
+	Requests []RequestRecord                `json:"requests,omitempty"`
 }
 
 // Stats 网关 Token 用量聚合器。并发安全；path 为空时纯内存（不落盘）。
@@ -97,6 +98,7 @@ type Stats struct {
 	days     map[string]Counters
 	models   map[string]map[string]Counters
 	accounts map[string]map[string]Counters
+	requests []RequestRecord
 
 	// now 供测试注入时钟；nil 时用 time.Now。
 	now func() time.Time
@@ -109,6 +111,7 @@ func New(path string) *Stats {
 		days:     map[string]Counters{},
 		models:   map[string]map[string]Counters{},
 		accounts: map[string]map[string]Counters{},
+		requests: make([]RequestRecord, 0),
 	}
 	if path != "" {
 		s.load()
@@ -298,12 +301,17 @@ func (s *Stats) flusher() {
 
 // fileStateLocked 收集内存状态为磁盘结构。调用方必须已持有 s.mu。
 func (s *Stats) fileStateLocked() fileState {
+	savedReqs := s.requests
+	if len(savedReqs) > maxSavedRequests {
+		savedReqs = savedReqs[len(savedReqs)-maxSavedRequests:]
+	}
 	return fileState{
 		Version:  1,
 		SavedAt:  s.clock(),
 		Days:     s.days,
 		Models:   s.models,
 		Accounts: s.accounts,
+		Requests: savedReqs,
 	}
 }
 
@@ -329,6 +337,9 @@ func (s *Stats) load() {
 	}
 	if fs.Accounts != nil {
 		s.accounts = fs.Accounts
+	}
+	if fs.Requests != nil {
+		s.requests = fs.Requests
 	}
 }
 

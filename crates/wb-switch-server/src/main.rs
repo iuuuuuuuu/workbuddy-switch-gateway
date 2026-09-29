@@ -86,13 +86,11 @@ fn spawn_background_loops() {
 
 fn print_status() {
     let auth = auth_file::read_auth_file();
-    let current = auth.as_ref().and_then(|a| {
+    let current = auth.as_ref().map(|a| {
         let acct = a.get("account").cloned().unwrap_or_else(|| json!({}));
-        Some(json!({
-            "uid": acct.get("uid"),
-            "nickname": acct.get("nickname"),
-            "email": acct.get("email"),
-        }))
+        // 与 /api/status 同源防线：展示字段只接受字符串，加密信封
+        // `{ $wbEncrypted, envelope }` 必须归一成 null（issue #38/#40）。
+        account::current_account_view(&acct)
     });
     let running = process::is_workbuddy_running();
     println!("workbuddy-switch v{}", update::APP_VERSION);
